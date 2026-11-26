@@ -1,65 +1,70 @@
-# OFFDP — Offline-First Field Data Platform
+# OFFDP — Offline-First Field Data Platform (Digital Census 2026)
 
 **Authors**: Reetik Sil, Narayan Chetri, Dipankar Das  
 **Programme**: Master of Computer Applications (MCA), Tezpur University  
-**Specification**: IEEE 830-style Software Requirements Specification (SRS) Version 1.0  
+**Package / Version**: `com.offdp.app` • `v1.0.0` (Expo SDK 58 / React Native 0.88)
 
 ---
 
-## 📱 How to Run & Test on Mobile
+## 📱 Building & Running the Android APK
 
-### Method 1: Instant Mobile Testing with Expo Go (Recommended — 1 Minute)
-
-1. **Install Expo Go on your mobile phone**:
-   - **Android**: Install [Expo Go](https://play.google.com/store/apps/details?id=host.exp.exponent) from Google Play Store.
-   - **iOS**: Install [Expo Go](https://apps.apple.com/app/expo-go/id982107779) from Apple App Store.
-
-2. **Start the local server**:
-   Open a terminal in `C:\Users\naray\Desktop\OFFDP` and run:
-   ```bash
-   npx expo start
-   ```
-   *(If your mobile phone and computer are on different networks or cellular data, run `npx expo start --tunnel`)*.
-
-3. **Open the App**:
-   - **On Android**: In Expo Go, tap **"Scan QR code"** and scan the QR code displayed in your terminal. You can also tap **"Enter URL manually"** and enter:
-     ```
-     exp://<YOUR_PC_IP>:8082
-     ```
-   - **On iOS**: Open the built-in Camera app, scan the terminal QR code, and tap the prompt.
-
----
-
-### Method 2: Standalone Android APK Build
-
-#### Build via EAS Cloud (No local Android Studio / NDK required):
+### Option 1: Standalone Android APK via EAS Cloud (Recommended)
+[`eas.json`](eas.json) is configured with a `preview` profile that builds a directly installable `.apk`:
 ```bash
 npx eas-cli build -p android --profile preview
 ```
-This produces a downloadable `.apk` file that installs directly on any Android device.
+Download and install the generated `.apk` on any Android device.
+
+### Option 2: Local Android Build
+With Android Studio / Android SDK configured locally:
+```bash
+npx expo run:android
+```
+
+### Option 3: Development Server (Expo Go)
+1. Install **Expo Go** on [Android](https://play.google.com/store/apps/details?id=host.exp.exponent) or [iOS](https://apps.apple.com/app/expo-go/id982107779).
+2. Start the Metro bundler:
+   ```bash
+   npx expo start
+   ```
+   *(Use `npx expo start --tunnel` if your phone and PC are on different networks.)*
+
+---
+
+## 🏗️ Architecture & Offline-First Sync
+
+- **Local Persistence**: Uses `@react-native-async-storage/async-storage` for instant, non-blocking offline reads/writes of census records, drafts, sync queue items, and cached user credentials.
+- **Cloud Backend**: Integrates with **Supabase** (`@supabase/supabase-js`) for two-way synchronization of `field_records` and `app_users`.
+- **Real-Time Network Detection**: Uses `@react-native-community/netinfo` to display a live **Online / Offline** status badge in the header and automatically sync pending records when connectivity is restored (plus a 15-second background sync interval while online).
+- **Aadhaar De-duplication**: Normalizes and validates 12-digit Aadhaar UIDs locally before saving to prevent duplicate household submissions.
+
+---
+
+## 🔐 Role-Based Access & Default Credentials
+
+- **Default Supervisor Account**:
+  - **Username**: `narayan`
+  - **Password**: `admin`
+- **Field Worker Accounts**: Created and managed by a Supervisor in the **User Management** screen (automatically synced to Supabase and cached for offline login).
 
 ---
 
 ## 🎨 Implemented Screens & Features
 
-| # | Screen Name | SRS Requirement | Implemented Features |
-|---|-------------|-----------------|----------------------|
-| **1** | **Splash Screen** | NFR-4.1 | Midnight purple gradient, mountain ridge silhouettes, hiker silhouette, brand logo, auto-transition to Login. |
-| **2** | **Login (Offline Auth)** | FR-1.1, FR-1.3, FR-1.4 | Cached offline session, "Remember me (offline)", quick-switch between **Field Worker** and **Supervisor** (RBAC). |
-| **3** | **Home / Dashboard** | NFR-4.1, FR-6.4 | 4 Action Cards (*New Entry*, *My Records*, *Sync*, *Sync Status*), **Offline/Online** pill toggle in header, rolling hills illustration. |
-| **4** | **Data Collection** | FR-2.1, FR-2.4, FR-2.5, NFR-1.2 | GPS coordinate capture, dynamic fields (*Water Quality*, *Vegetation*, *Soil*), local photo picker with compression stats badge, *Save Draft* & *Save*. |
-| **5** | **My Records (Local Data)** | FR-2.2, FR-2.3 | Filter tabs (*All (12)*, *Drafts (3)*, *Pending Sync (5)*, *Synced (4)*), live search bar, Tezpur field sample records. |
-| **6** | **Synchronization** | FR-3.1, FR-3.2, FR-3.3, FR-6.1 | Persistent delta queue, *Sync Now* with live upload simulation, Background sync & Wi-Fi toggles, network status simulator. |
-| **7** | **Conflict Resolution** | FR-4.2, FR-4.3, FR-4.5 | Version comparison (*My Changes (Device)* vs *Server Version* vs *Merge Manually*), LWW policy, resolution commit. |
-| **8** | **Supervisor Review** | FR-5.1, FR-5.2, FR-5.3 | *Pending (3)* and *Resolved (12)* tabs, side-by-side version comparison modal, *Accept Worker*, *Accept Server*, or *Flag Error*. |
+| # | Screen | Role Access | Implemented Features |
+|---|--------|-------------|----------------------|
+| **1** | **Splash Screen** | All | Purple gradient (`#27124f` → `#542699`), OFFDP brand mark, *"Collect • Store Offline • Sync Later"* tagline, auto-advances (2.8s) or tap to continue. |
+| **2** | **Login (Offline & Cloud Auth)** | All | Role selector (*Supervisor* / *Field Worker*), username & password sign-in, *Remember me*, role-mismatch handling, offline credential cache + Supabase `app_users` sync. |
+| **3** | **Dashboard** | All (Role-Aware) | Pull-to-refresh, user/role header, live *Online / Offline* badge, and role-specific quick actions & metrics. |
+| **4** | **Data Collection (Digital Census 2026)** | Field Worker | GPS coordinate capture (`expo-location`), photo capture/picker (`expo-image-picker`), full household census form (Head of Family, Aadhaar UID, Demographics, Housing, 8 Amenities, Occupation & Income), *Save Draft* & *Submit Survey*. |
+| **5** | **My Field Records** | Field Worker | Filter tabs (*All*, *Drafts*, *Pending*, *Synced*), live search, pull-to-refresh, resume/delete drafts, and record detail modal. |
+| **6** | **Synchronization & Queue** | Field Worker | Persistent offline delta queue, manual *Sync Now* with progress status, background sync & Wi-Fi-only toggles, last sync timestamp. |
+| **7** | **Supervisor Review** | Supervisor | *Pending*, *Approved*, and *Rejected* tabs; household detail inspection; *Approve*, *Reject* (with reason), and inline *Edit Record* with supervisor notes. |
+| **8** | **All Master Census Data** | Supervisor | Master view across all statuses (*All*, *Approved*, *Synced*, *Pending*, *Draft*), search bar, pull-to-refresh, detail modal, and supervisor editing. |
+| **9** | **User Management** | Supervisor | Create, edit, and list Field Worker & Supervisor accounts with 2-way Supabase + offline cache sync. |
 
 ---
 
-## ⚡ Instant Navigation & Evaluator Shortcuts
+## 🧭 Navigation
 
-Tap the **`⊞` (Apps Menu)** icon at the top-right corner of any screen at any time to:
-- Jump directly to any of the 8 specification screens.
-- Toggle between **Field Worker** and **Supervisor** roles.
-- Switch simulated connection between **Online** and **Offline**.
-- Reset local SQLite/AsyncStorage to original seed data.
-
+Tap the **☰ (Hamburger Menu)** icon at the top-left of the Dashboard to open the sliding navigation drawer, switch between role-permitted screens, check live Supabase/SQLite sync status, or sign out.
