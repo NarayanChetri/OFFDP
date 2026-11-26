@@ -293,8 +293,9 @@ export class AuthService {
     const cachedMap = await this.getCachedCredentialsMap();
     const cachedEntry = cachedMap[uClean];
 
-    // 1. If online, verify against Supabase so role/password updates are always respected
-    if (isOnline && isSupabaseConfigured()) {
+    // 1. Always try Supabase when configured (even if NetInfo misreports offline),
+    //    and fall back to the local credential cache only on a network failure.
+    if (isSupabaseConfigured()) {
       try {
         const { data: rows, error } = await supabase
           .from('app_users')
