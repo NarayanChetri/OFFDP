@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { StyleSheet, View, Alert } from 'react-native';
+import { StyleSheet, View, Alert, BackHandler } from 'react-native';
 import { StatusBar } from 'expo-status-bar';
 import NetInfo from '@react-native-community/netinfo';
 import { ScreenName, User, FieldRecord, SyncQueueItem, CensusData } from './src/types';
@@ -7,6 +7,7 @@ import { StorageService } from './src/services/storageService';
 import { AuthService } from './src/services/authService';
 import { SyncService } from './src/services/syncService';
 import { generateUUID } from './src/utils/helpers';
+import { StyledAlertModal } from './src/components/StyledAlertModal';
 
 // Screens
 import { SplashScreen } from './src/screens/SplashScreen';
@@ -29,6 +30,7 @@ export default function App() {
   const [records, setRecords] = useState<FieldRecord[]>([]);
   const [syncQueue, setSyncQueue] = useState<SyncQueueItem[]>([]);
   const [lastSyncTime, setLastSyncTime] = useState('Never');
+  const [exitModalVisible, setExitModalVisible] = useState(false);
 
   // Draft / rejected record being resumed/edited
   const [editingDraft, setEditingDraft] = useState<FieldRecord | null>(null);
@@ -37,6 +39,38 @@ export default function App() {
   const [isOnline, setIsOnline] = useState<boolean>(true);
   const isOnlineRef = useRef(true);
   const isWifiRef = useRef(true);
+  const currentUserRef = useRef<User | null>(null);
+
+  useEffect(() => {
+    currentUserRef.current = currentUser;
+  }, [currentUser]);
+
+  // Global Android hardware back button & gesture handling
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      if (drawerVisible) {
+        setDrawerVisible(false);
+        return true;
+      }
+      if (
+        currentScreen === 'MyRecords' ||
+        currentScreen === 'SyncQueue' ||
+        currentScreen === 'AllRecords' ||
+        currentScreen === 'SupervisorReview' ||
+        currentScreen === 'UserManagement'
+      ) {
+        setCurrentScreen('Dashboard');
+        return true;
+      }
+      if (currentScreen === 'Dashboard' || currentScreen === 'Login') {
+        setExitModalVisible(true);
+        return true;
+      }
+      return false;
+    });
+
+    return () => sub.remove();
+  }, [drawerVisible, currentScreen]);
 
   // Monitor network connectivity
   useEffect(() => {
@@ -62,17 +96,23 @@ export default function App() {
     return () => unsubscribe();
   }, []);
 
-  const loadData = async () => {
-    const loadedRecords = await StorageService.getRecords(isOnlineRef.current);
+  const loadData = async (explicitUser?: User | null) => {
+    const autoLogin = await AuthService.shouldAutoLogin();
+    const activeUser =
+      explicitUser !== undefined
+        ? explicitUser
+        : autoLogin
+        ? await AuthService.getCurrentUser()
+        : null;
+
+    const loadedRecords = await StorageService.getRecords(isOnlineRef.current, activeUser);
     const loadedQueue = await StorageService.getSyncQueue();
     const loadedTime = await StorageService.getLastSyncTime();
-    const autoLogin = await AuthService.shouldAutoLogin();
-    const activeUser = autoLogin ? await AuthService.getCurrentUser() : null;
 
     setRecords(loadedRecords);
     setSyncQueue(loadedQueue);
     setLastSyncTime(loadedTime);
-    if (activeUser) {
+    if (activeUser && explicitUser === undefined) {
       setCurrentUser(activeUser);
     }
   };
@@ -92,7 +132,7 @@ export default function App() {
       }
 
       await SyncService.executeSync();
-      const local = await StorageService.getLocalRecords();
+      const local = await StorageService.getRecords(isOnlineRef.current, currentUserRef.current);
       const loadedQueue = await StorageService.getSyncQueue();
       const loadedTime = await StorageService.getLastSyncTime();
       setRecords(local);
@@ -294,6 +334,7 @@ export default function App() {
         <LoginScreen
           onLoginSuccess={(user) => {
             setCurrentUser(user);
+            loadData(user);
             setCurrentScreen('Dashboard');
           }}
           isOnline={isOnline}
@@ -449,6 +490,23 @@ export default function App() {
         onSelectScreen={(screen) => setCurrentScreen(screen)}
         onClose={() => setDrawerVisible(false)}
         onLogout={handleLogout}
+      />
+
+      {/* Android Exit Confirmation Modal */}
+      <StyledAlertModal
+        visible={exitModalVisible}
+        title="Exit OFFDP?"
+        message="Do you want to exit the application?"
+        type="info"
+        buttons={[
+          { text: 'Cancel', style: 'cancel' },
+          {
+            text: 'Exit',
+            style: 'destructive',
+            onPress: () => BackHandler.exitApp(),
+          },
+        ]}
+        onDismiss={() => setExitModalVisible(false)}
       />
     </View>
   );

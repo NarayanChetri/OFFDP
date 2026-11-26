@@ -10,13 +10,14 @@ import {
   Platform,
   ScrollView,
   Dimensions,
-  Alert,
+  StatusBar,
 } from 'react-native';
 import { LinearGradient } from 'expo-linear-gradient';
 import { Ionicons } from '@expo/vector-icons';
 import { COLORS, SHADOWS } from '../constants/theme';
 import { AuthService } from '../services/authService';
 import { User, UserRole } from '../types';
+import { StyledAlertModal, AlertButton, AlertType } from '../components/StyledAlertModal';
 
 const { width } = Dimensions.get('window');
 
@@ -32,6 +33,28 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess, isOnli
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [loading, setLoading] = useState(false);
+  const [alertState, setAlertState] = useState<{
+    visible: boolean;
+    title: string;
+    message: string;
+    type: AlertType;
+    buttons: AlertButton[];
+  }>({
+    visible: false,
+    title: '',
+    message: '',
+    type: 'info',
+    buttons: [{ text: 'OK' }],
+  });
+
+  const showAlert = (
+    title: string,
+    message: string,
+    type: AlertType = 'info',
+    buttons: AlertButton[] = [{ text: 'OK' }]
+  ) => {
+    setAlertState({ visible: true, title, message, type, buttons });
+  };
 
   const handleRoleSelect = (role: UserRole) => {
     setSelectedRole(role);
@@ -41,7 +64,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess, isOnli
 
   const handleLogin = async () => {
     if (!username.trim() || !password.trim()) {
-      Alert.alert('Sign In Error', 'Please enter your username and password.');
+      showAlert('Sign In Error', 'Please enter your username and password.', 'error');
       return;
     }
 
@@ -51,9 +74,10 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess, isOnli
 
     if (result.success && result.user) {
       if (result.user.role !== selectedRole) {
-        Alert.alert(
+        showAlert(
           'Role Mismatch',
           `This account has the role "${result.user.role === 'supervisor' ? 'Supervisor' : 'Field Worker'}". You are signing in as "${selectedRole === 'supervisor' ? 'Supervisor' : 'Field Worker'}".`,
+          'info',
           [
             { text: 'Cancel', style: 'cancel' },
             {
@@ -66,15 +90,17 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess, isOnli
       }
       onLoginSuccess(result.user);
     } else if (result.requiresInternet) {
-      Alert.alert(
+      showAlert(
         'Internet Required for First Sign-In',
         result.error ||
-          'An internet connection is required for your first sign-in on this device. Once signed in, your credentials are saved locally for offline access.'
+          'An internet connection is required for your first sign-in on this device. Once signed in, your credentials are saved locally for offline access.',
+        'warning'
       );
     } else {
-      Alert.alert(
+      showAlert(
         'Authentication Failed',
-        result.error || 'Invalid credentials. Please verify your username and password.'
+        result.error || 'Invalid credentials. Please verify your username and password.',
+        'error'
       );
     }
   };
@@ -263,6 +289,15 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess, isOnli
           </View>
         </ScrollView>
       </KeyboardAvoidingView>
+
+      <StyledAlertModal
+        visible={alertState.visible}
+        title={alertState.title}
+        message={alertState.message}
+        type={alertState.type}
+        buttons={alertState.buttons}
+        onDismiss={() => setAlertState((prev) => ({ ...prev, visible: false }))}
+      />
     </SafeAreaView>
   );
 };
@@ -291,12 +326,12 @@ const styles = StyleSheet.create({
   },
   topStatusBadge: {
     position: 'absolute',
-    top: 24,
-    right: 20,
+    top: Platform.OS === 'android' ? (StatusBar.currentHeight || 28) + 10 : 16,
+    right: 18,
     flexDirection: 'row',
     alignItems: 'center',
     gap: 5,
-    backgroundColor: 'rgba(0,0,0,0.3)',
+    backgroundColor: 'rgba(0,0,0,0.35)',
     paddingHorizontal: 10,
     paddingVertical: 4.5,
     borderRadius: 14,

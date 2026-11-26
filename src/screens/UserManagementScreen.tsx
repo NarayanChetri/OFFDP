@@ -7,7 +7,6 @@ import {
   FlatList,
   Modal,
   TextInput,
-  Alert,
   RefreshControl,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
@@ -15,6 +14,7 @@ import { COLORS, SHADOWS } from '../constants/theme';
 import { HeaderBar } from '../components/HeaderBar';
 import { User, UserRole } from '../types';
 import { AuthService } from '../services/authService';
+import { StyledAlertModal, AlertButton, AlertType } from '../components/StyledAlertModal';
 
 interface UserManagementScreenProps {
   onBack: () => void;
@@ -38,6 +38,28 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
   const [password, setPassword] = useState('');
   const [role, setRole] = useState<UserRole>('field_worker');
   const [showPassword, setShowPassword] = useState(false);
+  const [alertState, setAlertState] = useState<{
+    visible: boolean;
+    title: string;
+    message: string;
+    type: AlertType;
+    buttons: AlertButton[];
+  }>({
+    visible: false,
+    title: '',
+    message: '',
+    type: 'info',
+    buttons: [{ text: 'OK' }],
+  });
+
+  const showAlert = (
+    title: string,
+    message: string,
+    type: AlertType = 'info',
+    buttons: AlertButton[] = [{ text: 'OK' }]
+  ) => {
+    setAlertState({ visible: true, title, message, type, buttons });
+  };
 
   const loadUsers = async () => {
     const list = await AuthService.getUsers(isOnline);
@@ -49,9 +71,10 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
   }, [isOnline]);
 
   const showOfflineAlert = (action: string) => {
-    Alert.alert(
+    showAlert(
       'Internet Connection Required',
-      `You are currently offline. An active internet connection is required to ${action} user accounts.`
+      `You are currently offline. An active internet connection is required to ${action} user accounts.`,
+      'warning'
     );
   };
 
@@ -91,10 +114,9 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
 
     if (editingUser) {
       if (!name.trim()) {
-        Alert.alert('Validation Error', 'Full Name is required.');
+        showAlert('Validation Error', 'Full Name is required.', 'error');
         return;
       }
-      // Update existing user (password optional when editing)
       const result = await AuthService.updateUser(
         editingUser.id,
         {
@@ -106,18 +128,21 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
       );
 
       if (result.success) {
-        Alert.alert('User Updated', `User @${username} was updated successfully.`);
         setModalVisible(false);
         await loadUsers();
+        showAlert('User Updated', `User @${username} was updated successfully.`, 'success');
       } else {
-        Alert.alert(result.offlineBlocked ? 'Internet Required' : 'Error', result.error || 'Failed to update user.');
+        showAlert(
+          result.offlineBlocked ? 'Internet Required' : 'Error',
+          result.error || 'Failed to update user.',
+          result.offlineBlocked ? 'warning' : 'error'
+        );
       }
     } else {
       if (!name.trim() || !username.trim() || !password.trim()) {
-        Alert.alert('Validation Error', 'Full Name, Username, and Password are all required.');
+        showAlert('Validation Error', 'Full Name, Username, and Password are all required.', 'error');
         return;
       }
-      // Create new user
       const result = await AuthService.createUser(
         {
           name,
@@ -129,11 +154,19 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
       );
 
       if (result.success) {
-        Alert.alert('User Created', `User @${username} registered successfully as ${role === 'supervisor' ? 'Supervisor' : 'Field Worker'}.`);
         setModalVisible(false);
         await loadUsers();
+        showAlert(
+          'User Created',
+          `User @${username} registered successfully as ${role === 'supervisor' ? 'Supervisor' : 'Field Worker'}.`,
+          'success'
+        );
       } else {
-        Alert.alert(result.offlineBlocked ? 'Internet Required' : 'Error', result.error || 'Failed to create user.');
+        showAlert(
+          result.offlineBlocked ? 'Internet Required' : 'Error',
+          result.error || 'Failed to create user.',
+          result.offlineBlocked ? 'warning' : 'error'
+        );
       }
     }
   };
@@ -144,13 +177,14 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
       return;
     }
     if (u.username.toLowerCase() === 'narayan') {
-      Alert.alert('Action Forbidden', 'The default supervisor "narayan" cannot be deleted.');
+      showAlert('Action Forbidden', 'The default supervisor "narayan" cannot be deleted.', 'error');
       return;
     }
 
-    Alert.alert(
+    showAlert(
       'Confirm Delete',
       `Are you sure you want to delete user @${u.username} (${u.name})?`,
+      'warning',
       [
         { text: 'Cancel', style: 'cancel' },
         {
@@ -160,9 +194,13 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
             const res = await AuthService.deleteUser(u.id, isOnline);
             if (res.success) {
               await loadUsers();
-              Alert.alert('Deleted', `User @${u.username} was removed.`);
+              showAlert('Deleted', `User @${u.username} was removed.`, 'success');
             } else {
-              Alert.alert(res.offlineBlocked ? 'Internet Required' : 'Error', res.error || 'Failed to delete user.');
+              showAlert(
+                res.offlineBlocked ? 'Internet Required' : 'Error',
+                res.error || 'Failed to delete user.',
+                res.offlineBlocked ? 'warning' : 'error'
+              );
             }
           },
         },
@@ -381,6 +419,15 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
           </View>
         </View>
       </Modal>
+
+      <StyledAlertModal
+        visible={alertState.visible}
+        title={alertState.title}
+        message={alertState.message}
+        type={alertState.type}
+        buttons={alertState.buttons}
+        onDismiss={() => setAlertState((prev) => ({ ...prev, visible: false }))}
+      />
     </View>
   );
 };

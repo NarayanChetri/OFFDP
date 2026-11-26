@@ -45,7 +45,7 @@ export class AuthService {
     }
   }
 
-  // Fetch user directory (without exposing passwords in offline list cache)
+  // Fetch user directory (passwords stripped before caching)
   static async getUsers(isOnline: boolean = true): Promise<User[]> {
     let localUsers: User[] = [];
     try {
@@ -59,8 +59,7 @@ export class AuthService {
       try {
         const { data: cloudUsers, error } = await supabase
           .from('app_users')
-          .select('id, username, name, role, email, created_at')
-          .order('created_at', { ascending: true });
+          .select('*');
 
         if (!error && cloudUsers) {
           const mappedUsers: User[] = cloudUsers.map((cu: any) => ({
@@ -117,13 +116,17 @@ export class AuthService {
     }
 
     try {
-      const { data: existing } = await supabase
+      const { data: existing, error: checkError } = await supabase
         .from('app_users')
         .select('id')
         .ilike('username', cleanUsername)
-        .maybeSingle();
+        .limit(1);
 
-      if (existing) {
+      if (checkError) {
+        return { success: false, error: checkError.message };
+      }
+
+      if (existing && existing.length > 0) {
         return { success: false, error: 'Username already exists.' };
       }
 
@@ -152,7 +155,6 @@ export class AuthService {
         return { success: false, error: error.message };
       }
 
-      // Refresh local directory cache
       await this.getUsers(true);
       return { success: true, user: newUser };
     } catch (err: any) {
@@ -194,25 +196,25 @@ export class AuthService {
         .from('app_users')
         .update(payload)
         .eq('id', id)
-        .select('id, username, name, role, email, created_at')
-        .single();
+        .select('*')
+        .limit(1);
 
-      if (error || !data) {
+      if (error || !data || data.length === 0) {
         return { success: false, error: error?.message || 'User not found.' };
       }
 
+      const row = data[0];
       const updatedUser: User = {
-        id: data.id,
-        username: data.username,
-        name: data.name,
-        role: data.role as UserRole,
-        email: data.email,
+        id: row.id,
+        username: row.username,
+        name: row.name,
+        role: row.role as UserRole,
+        email: row.email,
         cachedOffline: true,
-        token: `jwt_${data.username}`,
-        createdAt: data.created_at,
+        token: `jwt_${row.username}`,
+        createdAt: row.created_at,
       };
 
-      // Update cached credential if this user was cached on this device
       if (updates.password && updates.password.trim()) {
         const creds = await this.getCachedCredentialsMap();
         if (creds[updatedUser.username.toLowerCase()]) {
@@ -294,13 +296,27 @@ export class AuthService {
     // 1. If online, verify against Supabase so role/password updates are always respected
     if (isOnline && isSupabaseConfigured()) {
       try {
-        const { data: cloudUser, error } = await supabase
+        const { data: rows, error } = await supabase
           .from('app_users')
-          .select('id, username, password, name, role, email, created_at')
+          .select('*')
           .ilike('username', uClean)
-          .maybeSingle();
+          .limit(1);
 
-        if (!error && cloudUser) {
+        if (error) {
+          const isNetworkErr =
+            error.message?.toLowerCase().includes('fetch') ||
+            error.message?.toLowerCase().includes('network');
+
+          if (!isNetworkErr) {
+            return { success: false, error: `Server error: ${error.message}` };
+          }
+          // If it's a real network failure, fall through to offline cache check below
+        } else {
+          if (!rows || rows.length === 0) {
+            return { success: false, error: 'Invalid username or password.' };
+          }
+
+          const cloudUser = rows[0];
           if (cloudUser.password !== pClean) {
             return { success: false, error: 'Invalid username or password.' };
           }
@@ -316,28 +332,24 @@ export class AuthService {
             createdAt: cloudUser.created_at,
           };
 
-          // Cache credentials locally for future offline logins
           await this.saveCachedCredential(authenticatedUser, pClean);
           await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authenticatedUser));
           await AsyncStorage.setItem(REMEMBER_ME_KEY, rememberMe ? 'true' : 'false');
           return { success: true, user: authenticatedUser };
-        }
-
-        if (!error && !cloudUser) {
-          return { success: false, error: 'Invalid username or password.' };
         }
       } catch (err) {
         console.warn('Online auth check failed, checking local cache:', err);
       }
     }
 
-    // 2. Offline (or cloud unreachable): only allow if user has already signed in online before
+    // 2. Offline (or network unreachable): only allow if user has already signed in online before
     if (!cachedEntry) {
       return {
         success: false,
         requiresInternet: true,
-        error:
-          'Internet connection is required for your first sign-in on this device. Connect to Wi-Fi or mobile data and sign in once to enable offline access.',
+        error: isOnline
+          ? 'Unable to reach the authentication server. Please check your internet connection and try again.'
+          : 'Internet connection is required for your first sign-in on this device. Connect to Wi-Fi or mobile data and sign in once to enable offline access.',
       };
     }
 
@@ -356,7 +368,6 @@ export class AuthService {
     return { success: true, user: offlineUser };
   }
 
-  // Get current active session
   static async getCurrentUser(): Promise<User | null> {
     try {
       const data = await AsyncStorage.getItem(AUTH_STORAGE_KEY);
@@ -369,7 +380,6 @@ export class AuthService {
     }
   }
 
-  // Check whether Remember Me auto-login is enabled
   static async shouldAutoLogin(): Promise<boolean> {
     try {
       const remember = await AsyncStorage.getItem(REMEMBER_ME_KEY);
@@ -381,7 +391,6 @@ export class AuthService {
     }
   }
 
-  // Logout (clears active session, preserves offline login cache so user can sign back in offline)
   static async logout(): Promise<void> {
     await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
     await AsyncStorage.setItem(REMEMBER_ME_KEY, 'false');

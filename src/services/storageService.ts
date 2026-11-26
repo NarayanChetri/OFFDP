@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { FieldRecord, SyncQueueItem, CensusData } from '../types';
+import { FieldRecord, SyncQueueItem, CensusData, User } from '../types';
 import { supabase, isSupabaseConfigured } from './supabaseClient';
 import { generateUUID } from '../utils/helpers';
 
@@ -50,16 +50,23 @@ export class StorageService {
     await AsyncStorage.setItem(STORAGE_KEYS.SYNC_SETTINGS, JSON.stringify(settings));
   }
 
-  // Gets records: loads local storage first, then pulls from Supabase if online
-  static async getRecords(isOnline: boolean = true): Promise<FieldRecord[]> {
+  // Gets records: loads local storage first, then pulls from Supabase if online.
+  // Field workers only pull their own records from cloud; supervisors pull all records.
+  static async getRecords(isOnline: boolean = true, currentUser?: User | null): Promise<FieldRecord[]> {
     const local = await this.getLocalRecords();
 
-    if (isOnline && isSupabaseConfigured()) {
+    if (isOnline && isSupabaseConfigured() && currentUser) {
       try {
-        const { data: cloudRecords, error } = await supabase
+        let query = supabase
           .from('field_records')
           .select('*')
           .order('updated_at', { ascending: false });
+
+        if (currentUser.role !== 'supervisor') {
+          query = query.eq('submitted_by', currentUser.id);
+        }
+
+        const { data: cloudRecords, error } = await query;
 
         if (!error && cloudRecords) {
           const queue = await this.getSyncQueue();
