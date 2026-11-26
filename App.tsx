@@ -105,7 +105,11 @@ export default function App() {
         ? await AuthService.getCurrentUser()
         : null;
 
-    const loadedRecords = await StorageService.getRecords(isOnlineRef.current, activeUser);
+    const loadedRecords = await StorageService.getRecords(
+      isOnlineRef.current,
+      activeUser,
+      true
+    );
     const loadedQueue = await StorageService.getSyncQueue();
     const loadedTime = await StorageService.getLastSyncTime();
 
@@ -363,8 +367,14 @@ export default function App() {
             onNavigateMyRecords={() => setCurrentScreen('MyRecords')}
             onNavigateSyncQueue={() => setCurrentScreen('SyncQueue')}
             onNavigateUserManagement={() => setCurrentScreen('UserManagement')}
-            onNavigateSupervisorReview={() => setCurrentScreen('SupervisorReview')}
-            onNavigateAllRecords={() => setCurrentScreen('AllRecords')}
+            onNavigateSupervisorReview={() => {
+              loadData(currentUser);
+              setCurrentScreen('SupervisorReview');
+            }}
+            onNavigateAllRecords={() => {
+              loadData(currentUser);
+              setCurrentScreen('AllRecords');
+            }}
           />
         );
 
@@ -469,8 +479,14 @@ export default function App() {
             onNavigateMyRecords={() => setCurrentScreen('MyRecords')}
             onNavigateSyncQueue={() => setCurrentScreen('SyncQueue')}
             onNavigateUserManagement={() => setCurrentScreen('UserManagement')}
-            onNavigateSupervisorReview={() => setCurrentScreen('SupervisorReview')}
-            onNavigateAllRecords={() => setCurrentScreen('AllRecords')}
+            onNavigateSupervisorReview={() => {
+              loadData(currentUser);
+              setCurrentScreen('SupervisorReview');
+            }}
+            onNavigateAllRecords={() => {
+              loadData(currentUser);
+              setCurrentScreen('AllRecords');
+            }}
           />
         );
     }

@@ -52,10 +52,14 @@ export class StorageService {
 
   // Gets records: loads local storage first, then pulls from Supabase if online.
   // Field workers only pull their own records from cloud; supervisors pull all records.
-  static async getRecords(isOnline: boolean = true, currentUser?: User | null): Promise<FieldRecord[]> {
+  static async getRecords(
+    isOnline: boolean = true,
+    currentUser?: User | null,
+    forceCloud: boolean = false
+  ): Promise<FieldRecord[]> {
     const local = await this.getLocalRecords();
 
-    if (isOnline && isSupabaseConfigured() && currentUser) {
+    if ((isOnline || forceCloud) && isSupabaseConfigured() && currentUser) {
       try {
         let query = supabase
           .from('field_records')

@@ -70,21 +70,13 @@ export const SyncQueueScreen: React.FC<SyncQueueScreenProps> = ({
       return;
     }
 
-    if (!isOnline) {
-      Alert.alert(
-        'Offline',
-        'Cannot synchronize because your device has no active internet connection. Connect to Wi-Fi or cellular data to upload pending records.'
-      );
-      return;
-    }
-
     setIsSyncing(true);
     setSyncProgressMsg('Connecting to central database...');
 
     try {
       const result = await SyncService.executeSync((curr, total, msg) => {
         setSyncProgressMsg(`(${curr}/${total}) ${msg}`);
-      });
+      }, true);
 
       setIsSyncing(false);
       onSyncCompleted();

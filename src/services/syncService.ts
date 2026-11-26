@@ -21,13 +21,14 @@ export class SyncService {
 
   // Executes synchronization of pending and previously failed queue items
   static async executeSync(
-    onProgress?: (current: number, total: number, message: string) => void
+    onProgress?: (current: number, total: number, message: string) => void,
+    force: boolean = false
   ): Promise<SyncResult> {
     if (this.isSyncingInProgress) {
       return { syncedCount: 0, failedCount: 0, timestamp: '' };
     }
 
-    const isCloudConnected = isSupabaseConfigured() && this.isOnlineState;
+    const isCloudConnected = isSupabaseConfigured() && (this.isOnlineState || force);
     if (!isCloudConnected) {
       // Never mark records as synced when offline or unconfigured
       return { syncedCount: 0, failedCount: 0, timestamp: '' };
