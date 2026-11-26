@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useCallback } from 'react';
 import {
   View,
   Text,
@@ -10,6 +10,7 @@ import {
   Alert,
   Switch,
   ActivityIndicator,
+  BackHandler,
 } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import * as Location from 'expo-location';
@@ -54,15 +55,30 @@ export const DataCollectionScreen: React.FC<DataCollectionScreenProps> = ({
   onSaveRecord,
   initialRecord,
 }) => {
-  const isEditingDraft = Boolean(initialRecord && initialRecord.status === 'draft');
+  const isEditingDraft = Boolean(
+    initialRecord && (initialRecord.status === 'draft' || initialRecord.status === 'rejected')
+  );
   const d = initialRecord?.data;
+  const hasInitialCoords = Boolean(
+    initialRecord?.coordinates &&
+      (initialRecord.coordinates.latitude !== 0 || initialRecord.coordinates.longitude !== 0)
+  );
 
   // Location & Locality
   const [siteLocation, setSiteLocation] = useState(initialRecord?.siteName || '');
   const [buildingNo, setBuildingNo] = useState(d?.buildingNo || '');
-  const [latitude, setLatitude] = useState(initialRecord?.coordinates?.latitude || 26.634);
-  const [longitude, setLongitude] = useState(initialRecord?.coordinates?.longitude || 92.791);
-  const [gpsAccuracy, setGpsAccuracy] = useState('4.0m');
+  const [latitude, setLatitude] = useState(
+    hasInitialCoords ? initialRecord!.coordinates.latitude : 0
+  );
+  const [longitude, setLongitude] = useState(
+    hasInitialCoords ? initialRecord!.coordinates.longitude : 0
+  );
+  const [gpsLocked, setGpsLocked] = useState(hasInitialCoords);
+  const [gpsAccuracy, setGpsAccuracy] = useState(
+    hasInitialCoords && initialRecord?.coordinates?.accuracy
+      ? `${initialRecord.coordinates.accuracy}m`
+      : 'Not locked'
+  );
   const [isLocating, setIsLocating] = useState(false);
 
   // Head of Family Details (Blank by default)
@@ -116,13 +132,15 @@ export const DataCollectionScreen: React.FC<DataCollectionScreenProps> = ({
   const [isPhotoLoading, setIsPhotoLoading] = useState(false);
 
   // Back button interception: ask to save to draft if anything is typed (Requirement 2)
-  const handleBackPress = () => {
+  const handleBackPress = useCallback(() => {
     const hasInput = Boolean(
       headName.trim() ||
       aadharNumber.trim() ||
       phoneNumber.trim() ||
       siteLocation.trim() ||
       buildingNo.trim() ||
+      totalMembers.trim() ||
+      age.trim() ||
       notes.trim() ||
       photoUri
     );
@@ -150,7 +168,15 @@ export const DataCollectionScreen: React.FC<DataCollectionScreenProps> = ({
     } else {
       onBack();
     }
-  };
+  }, [headName, aadharNumber, phoneNumber, siteLocation, buildingNo, totalMembers, age, notes, photoUri, onBack]);
+
+  useEffect(() => {
+    const sub = BackHandler.addEventListener('hardwareBackPress', () => {
+      handleBackPress();
+      return true;
+    });
+    return () => sub.remove();
+  }, [handleBackPress]);
 
   // Format Aadhaar: XXXX XXXX XXXX
   const handleAadharChange = (text: string) => {
@@ -179,6 +205,7 @@ export const DataCollectionScreen: React.FC<DataCollectionScreenProps> = ({
         const lng = parseFloat(loc.coords.longitude.toFixed(4));
         setLatitude(lat);
         setLongitude(lng);
+        setGpsLocked(true);
         setGpsAccuracy(`${loc.coords.accuracy ? loc.coords.accuracy.toFixed(1) : '3.5'}m`);
         if (!siteLocation.trim()) {
           setSiteLocation(`Geo Coordinates (${lat}, ${lng})`);
@@ -248,27 +275,7 @@ export const DataCollectionScreen: React.FC<DataCollectionScreenProps> = ({
     }
   };
 
-  const handleSave = (isDraft: boolean) => {
-    if (!isDraft) {
-      if (!headName.trim()) {
-        Alert.alert('Required Field', 'Please enter Head of Family Name.');
-        return;
-      }
-      const cleanAadhar = aadharNumber.replace(/\s/g, '');
-      if (cleanAadhar.length !== 12) {
-        Alert.alert('Required Field', 'Please enter a valid 12-digit Aadhaar Card Number.');
-        return;
-      }
-      if (!phoneNumber.trim() || phoneNumber.replace(/[^0-9]/g, '').length < 10) {
-        Alert.alert('Required Field', 'Please enter a 10-digit mobile phone number.');
-        return;
-      }
-      if (!siteLocation.trim()) {
-        Alert.alert('Required Field', 'Please enter Locality / Village name.');
-        return;
-      }
-    }
-
+  const commitSave = (isDraft: boolean) => {
     const censusPayload: CensusData = {
       headName: headName.trim(),
       aadharNumber: aadharNumber.trim(),
@@ -292,7 +299,11 @@ export const DataCollectionScreen: React.FC<DataCollectionScreenProps> = ({
     const recordToSave: Partial<FieldRecord> = {
       ...(initialRecord?.id ? { id: initialRecord.id } : {}),
       siteName: `${buildingNo.trim() ? buildingNo.trim() + ', ' : ''}${siteLocation.trim() || 'Survey Site'}`,
-      coordinates: { latitude, longitude, accuracy: parseFloat(gpsAccuracy) || 4.0 },
+      coordinates: {
+        latitude,
+        longitude,
+        accuracy: gpsLocked ? parseFloat(gpsAccuracy) || 4.0 : undefined,
+      },
       observationType: 'Digital Census 2026',
       data: censusPayload,
       photoUri: photoUri || undefined,
@@ -300,6 +311,66 @@ export const DataCollectionScreen: React.FC<DataCollectionScreenProps> = ({
     };
 
     onSaveRecord(recordToSave, isDraft);
+  };
+
+  const handleSave = (isDraft: boolean) => {
+    if (!isDraft) {
+      if (!headName.trim()) {
+        Alert.alert('Required Field', 'Please enter Head of Family Name.');
+        return;
+      }
+      const cleanAadhar = aadharNumber.replace(/\s/g, '');
+      if (cleanAadhar.length !== 12) {
+        Alert.alert('Required Field', 'Please enter a valid 12-digit Aadhaar Card Number.');
+        return;
+      }
+      if (!phoneNumber.trim() || phoneNumber.replace(/[^0-9]/g, '').length < 10) {
+        Alert.alert('Required Field', 'Please enter a 10-digit mobile phone number.');
+        return;
+      }
+      if (!siteLocation.trim()) {
+        Alert.alert('Required Field', 'Please enter Locality / Village name.');
+        return;
+      }
+      if (age.trim()) {
+        const ageNum = Number(age.trim());
+        if (!Number.isFinite(ageNum) || ageNum < 1 || ageNum > 120) {
+          Alert.alert('Invalid Age', 'Please enter a valid age between 1 and 120.');
+          return;
+        }
+      }
+      if (totalMembers.trim()) {
+        const totalNum = Number(totalMembers.trim());
+        if (!Number.isInteger(totalNum) || totalNum < 1) {
+          Alert.alert('Invalid Family Size', 'Total Members must be at least 1.');
+          return;
+        }
+        if (adultCount.trim() && childCount.trim()) {
+          const adults = Number(adultCount.trim());
+          const children = Number(childCount.trim());
+          if (adults + children !== totalNum) {
+            Alert.alert(
+              'Member Count Mismatch',
+              `Adults (${adults}) + Children (${children}) must equal Total Members (${totalNum}).`
+            );
+            return;
+          }
+        }
+      }
+      if (!gpsLocked) {
+        Alert.alert(
+          'GPS Location Not Locked',
+          'You have not locked GPS coordinates for this household yet.',
+          [
+            { text: 'Lock GPS Now', onPress: handleCaptureGPS },
+            { text: 'Submit Without GPS', onPress: () => commitSave(false) },
+          ]
+        );
+        return;
+      }
+    }
+
+    commitSave(isDraft);
   };
 
   return (
@@ -360,7 +431,9 @@ export const DataCollectionScreen: React.FC<DataCollectionScreenProps> = ({
             <View style={{ flex: 1, marginLeft: 8 }}>
               <Text style={styles.fieldLabel}>GPS Accuracy</Text>
               <View style={[styles.input, { justifyContent: 'center', backgroundColor: '#f8fafc' }]}>
-                <Text style={{ color: '#059669', fontWeight: '700' }}>± {gpsAccuracy}</Text>
+                <Text style={{ color: gpsLocked ? '#059669' : '#d97706', fontWeight: '700' }}>
+                  {gpsLocked ? `± ${gpsAccuracy}` : 'Not locked'}
+                </Text>
               </View>
             </View>
           </View>
@@ -377,7 +450,9 @@ export const DataCollectionScreen: React.FC<DataCollectionScreenProps> = ({
               <>
                 <Ionicons name="navigate-circle" size={20} color="#ffffff" />
                 <Text style={styles.gpsButtonText}>
-                  Lock GPS Location ({latitude.toFixed(4)}, {longitude.toFixed(4)})
+                  {gpsLocked
+                    ? `GPS Locked (${latitude.toFixed(4)}, ${longitude.toFixed(4)})`
+                    : 'Tap to Lock GPS Location'}
                 </Text>
               </>
             )}

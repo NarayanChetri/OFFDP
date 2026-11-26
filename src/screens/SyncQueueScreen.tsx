@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   View,
   Text,
@@ -15,6 +15,7 @@ import { COLORS, SHADOWS } from '../constants/theme';
 import { HeaderBar } from '../components/HeaderBar';
 import { SyncQueueItem } from '../types';
 import { SyncService } from '../services/syncService';
+import { StorageService } from '../services/storageService';
 
 interface SyncQueueScreenProps {
   syncQueue: SyncQueueItem[];
@@ -41,7 +42,26 @@ export const SyncQueueScreen: React.FC<SyncQueueScreenProps> = ({
   const [isRefreshing, setIsRefreshing] = useState(false);
   const [syncProgressMsg, setSyncProgressMsg] = useState('');
 
-  const pendingItems = syncQueue.filter((q) => q.status === 'pending');
+  useEffect(() => {
+    StorageService.getSyncSettings().then((settings) => {
+      setBackgroundSync(settings.backgroundSync);
+      setWifiOnly(settings.wifiOnly);
+    });
+  }, []);
+
+  const handleToggleBackgroundSync = async (val: boolean) => {
+    setBackgroundSync(val);
+    await StorageService.saveSyncSettings({ backgroundSync: val, wifiOnly });
+  };
+
+  const handleToggleWifiOnly = async (val: boolean) => {
+    setWifiOnly(val);
+    await StorageService.saveSyncSettings({ backgroundSync, wifiOnly: val });
+  };
+
+  const pendingItems = syncQueue.filter(
+    (q) => q.status === 'pending' || q.status === 'failed'
+  );
   const pendingCount = pendingItems.length;
 
   const handleSyncNow = async () => {
@@ -68,7 +88,17 @@ export const SyncQueueScreen: React.FC<SyncQueueScreenProps> = ({
 
       setIsSyncing(false);
       onSyncCompleted();
-      Alert.alert('Sync Successful', `All ${result.syncedCount} pending records were synchronized successfully.`);
+      if (result.failedCount > 0) {
+        Alert.alert(
+          'Partial Sync',
+          `${result.syncedCount} synced, ${result.failedCount} failed. Failed items remain queued for retry.`
+        );
+      } else {
+        Alert.alert(
+          'Sync Successful',
+          `All ${result.syncedCount} pending records were synchronized successfully.`
+        );
+      }
     } catch {
       setIsSyncing(false);
       Alert.alert('Sync Error', 'Network error occurred. Operations remain safely queued in local storage.');
@@ -161,7 +191,7 @@ export const SyncQueueScreen: React.FC<SyncQueueScreenProps> = ({
             </View>
             <Switch
               value={backgroundSync}
-              onValueChange={setBackgroundSync}
+              onValueChange={handleToggleBackgroundSync}
               trackColor={{ false: '#d1d5db', true: '#c4b5fd' }}
               thumbColor={backgroundSync ? COLORS.primary : '#f3f4f6'}
             />
@@ -180,7 +210,7 @@ export const SyncQueueScreen: React.FC<SyncQueueScreenProps> = ({
             </View>
             <Switch
               value={wifiOnly}
-              onValueChange={setWifiOnly}
+              onValueChange={handleToggleWifiOnly}
               trackColor={{ false: '#d1d5db', true: '#c4b5fd' }}
               thumbColor={wifiOnly ? COLORS.primary : '#f3f4f6'}
             />
@@ -222,6 +252,7 @@ export const SyncQueueScreen: React.FC<SyncQueueScreenProps> = ({
                   style={[
                     styles.queueStatusDot,
                     item.status === 'pending' && { backgroundColor: '#ea580c' },
+                    item.status === 'failed' && { backgroundColor: '#dc2626' },
                     item.status === 'synced' && { backgroundColor: '#16a34a' },
                   ]}
                 />
@@ -231,6 +262,7 @@ export const SyncQueueScreen: React.FC<SyncQueueScreenProps> = ({
                   </Text>
                   <Text style={styles.queueItemDetail}>
                     {item.operation} • {item.observationType}
+                    {item.status === 'failed' && item.errorReason ? ` • ${item.errorReason}` : ''}
                   </Text>
                 </View>
               </View>
@@ -239,6 +271,7 @@ export const SyncQueueScreen: React.FC<SyncQueueScreenProps> = ({
                 style={[
                   styles.queueItemStatus,
                   item.status === 'pending' && { color: '#ea580c' },
+                  item.status === 'failed' && { color: '#dc2626' },
                   item.status === 'synced' && { color: '#16a34a' },
                 ]}
               >

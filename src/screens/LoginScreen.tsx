@@ -46,7 +46,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess, isOnli
     }
 
     setLoading(true);
-    const result = await AuthService.login(username, password, rememberMe);
+    const result = await AuthService.login(username, password, rememberMe, isOnline);
     setLoading(false);
 
     if (result.success && result.user) {
@@ -65,6 +65,12 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess, isOnli
         return;
       }
       onLoginSuccess(result.user);
+    } else if (result.requiresInternet) {
+      Alert.alert(
+        'Internet Required for First Sign-In',
+        result.error ||
+          'An internet connection is required for your first sign-in on this device. Once signed in, your credentials are saved locally for offline access.'
+      );
     } else {
       Alert.alert(
         'Authentication Failed',
@@ -251,7 +257,7 @@ export const LoginScreen: React.FC<LoginScreenProps> = ({ onLoginSuccess, isOnli
             <View style={styles.offlineNoticeBox}>
               <Ionicons name="shield-checkmark" size={18} color="#15803d" />
               <Text style={styles.offlineNoticeText}>
-                Secure encrypted offline access active. You can authenticate and work with or without an internet connection.
+                First sign-in requires internet to verify your account. After that, your credentials are cached locally for instant offline sign-in.
               </Text>
             </View>
           </View>

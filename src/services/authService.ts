@@ -1,259 +1,359 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { User, UserRole } from '../types';
 import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { generateUUID, hashCredential } from '../utils/helpers';
 
 const AUTH_STORAGE_KEY = '@offdp_authenticated_user_v2';
-const USERS_STORAGE_KEY = '@offdp_registered_users_v2';
+const USERS_STORAGE_KEY = '@offdp_registered_users_v3';
+const CACHED_CREDENTIALS_KEY = '@offdp_cached_credentials_v1';
 const REMEMBER_ME_KEY = '@offdp_remember_me_v2';
 
-export const DEFAULT_SUPERVISOR: User = {
-  id: 'user-narayan-001',
-  username: 'narayan',
-  password: 'admin',
-  name: 'Narayan Chetri',
-  role: 'supervisor',
-  email: 'narayan@tezu.ac.in',
-  cachedOffline: true,
-  token: 'jwt_offline_narayan_admin_sec',
-  createdAt: '2026-11-01T00:00:00Z',
-};
+interface CachedCredential {
+  user: User;
+  passwordHash: string;
+  cachedAt: string;
+}
 
 export class AuthService {
-  // Sync users between Supabase (online) and AsyncStorage (offline cache)
-  static async getUsers(): Promise<User[]> {
+  private static async getCachedCredentialsMap(): Promise<Record<string, CachedCredential>> {
+    try {
+      const raw = await AsyncStorage.getItem(CACHED_CREDENTIALS_KEY);
+      return raw ? JSON.parse(raw) : {};
+    } catch {
+      return {};
+    }
+  }
+
+  private static async saveCachedCredential(user: User, plainPassword: string): Promise<void> {
+    const map = await this.getCachedCredentialsMap();
+    const key = user.username.trim().toLowerCase();
+    const safeUser: User = { ...user, password: '', cachedOffline: true };
+    map[key] = {
+      user: safeUser,
+      passwordHash: hashCredential(plainPassword, user.id),
+      cachedAt: new Date().toISOString(),
+    };
+    await AsyncStorage.setItem(CACHED_CREDENTIALS_KEY, JSON.stringify(map));
+  }
+
+  private static async removeCachedCredential(username: string): Promise<void> {
+    const map = await this.getCachedCredentialsMap();
+    const key = username.trim().toLowerCase();
+    if (map[key]) {
+      delete map[key];
+      await AsyncStorage.setItem(CACHED_CREDENTIALS_KEY, JSON.stringify(map));
+    }
+  }
+
+  // Fetch user directory (without exposing passwords in offline list cache)
+  static async getUsers(isOnline: boolean = true): Promise<User[]> {
     let localUsers: User[] = [];
     try {
       const data = await AsyncStorage.getItem(USERS_STORAGE_KEY);
-      localUsers = data ? JSON.parse(data) : [DEFAULT_SUPERVISOR];
+      localUsers = data ? JSON.parse(data) : [];
     } catch {
-      localUsers = [DEFAULT_SUPERVISOR];
+      localUsers = [];
     }
 
-    // Always ensure default supervisor exists in local store
-    if (!localUsers.some((u) => u.username.toLowerCase() === 'narayan')) {
-      localUsers.unshift(DEFAULT_SUPERVISOR);
-    }
-
-    // If Supabase is connected, perform 2-way sync with cloud!
-    if (isSupabaseConfigured()) {
+    if (isOnline && isSupabaseConfigured()) {
       try {
-        // 1. Fetch cloud users
         const { data: cloudUsers, error } = await supabase
           .from('app_users')
-          .select('*');
+          .select('id, username, name, role, email, created_at')
+          .order('created_at', { ascending: true });
 
         if (!error && cloudUsers) {
-          // 2. Upload any local users that are missing from cloud (e.g. user created on this phone before cloud table was created!)
-          for (const lu of localUsers) {
-            const alreadyInCloud = cloudUsers.some(
-              (cu: any) => cu.username.toLowerCase() === lu.username.toLowerCase()
-            );
-            if (!alreadyInCloud) {
-              await supabase.from('app_users').upsert({
-                id: lu.id,
-                username: lu.username,
-                password: lu.password || 'password123',
-                name: lu.name,
-                role: lu.role,
-                email: lu.email,
-                created_at: lu.createdAt || new Date().toISOString(),
-              });
-              cloudUsers.push({
-                id: lu.id,
-                username: lu.username,
-                password: lu.password || 'password123',
-                name: lu.name,
-                role: lu.role,
-                email: lu.email,
-                created_at: lu.createdAt,
-              });
-            }
-          }
-
-          // 3. Map all cloud users into local cache
-          const mergedUsers: User[] = cloudUsers.map((cu: any) => ({
+          const mappedUsers: User[] = cloudUsers.map((cu: any) => ({
             id: cu.id,
             username: cu.username,
-            password: cu.password,
             name: cu.name,
             role: cu.role as UserRole,
             email: cu.email,
-            cachedOffline: true,
+            cachedOffline: false,
             token: `jwt_${cu.username}`,
             createdAt: cu.created_at,
           }));
 
-          if (!mergedUsers.some((u) => u.username.toLowerCase() === 'narayan')) {
-            mergedUsers.unshift(DEFAULT_SUPERVISOR);
-          }
-
-          await AsyncStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(mergedUsers));
-          return mergedUsers;
+          await AsyncStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(mappedUsers));
+          return mappedUsers;
         }
       } catch (err) {
-        console.warn('Cloud user sync fallback to local cache:', err);
+        console.warn('Cloud user fetch fallback to local cache:', err);
       }
     }
 
     return localUsers;
   }
 
-  // Create new user (Worker or Supervisor)
-  static async createUser(userData: {
-    username: string;
-    password: string;
-    name: string;
-    role: UserRole;
-    email?: string;
-  }): Promise<{ success: boolean; user?: User; error?: string }> {
-    const users = await this.getUsers();
-    const cleanUsername = userData.username.trim().toLowerCase();
+  // Create new user (REQUIRES INTERNET)
+  static async createUser(
+    userData: {
+      username: string;
+      password: string;
+      name: string;
+      role: UserRole;
+      email?: string;
+    },
+    isOnline: boolean
+  ): Promise<{ success: boolean; user?: User; error?: string; offlineBlocked?: boolean }> {
+    if (!isOnline) {
+      return {
+        success: false,
+        offlineBlocked: true,
+        error: 'Internet connection is required to create a new user account.',
+      };
+    }
 
+    if (!isSupabaseConfigured()) {
+      return { success: false, error: 'Cloud backend is not configured.' };
+    }
+
+    const cleanUsername = userData.username.trim().toLowerCase();
     if (!cleanUsername) {
-      return { success: false, error: 'Username is required' };
+      return { success: false, error: 'Username is required.' };
     }
     if (!userData.password.trim()) {
-      return { success: false, error: 'Password is required' };
-    }
-    if (users.some((u) => u.username.toLowerCase() === cleanUsername)) {
-      return { success: false, error: 'Username already exists' };
+      return { success: false, error: 'Password is required.' };
     }
 
-    const newUser: User = {
-      id: `user-${Date.now().toString().slice(-6)}`,
-      username: cleanUsername,
-      password: userData.password,
-      name: userData.name.trim() || cleanUsername,
-      role: userData.role,
-      email: userData.email || `${cleanUsername}@field.offdp.org`,
-      cachedOffline: true,
-      token: `jwt_${cleanUsername}_${Date.now()}`,
-      createdAt: new Date().toISOString(),
-    };
+    try {
+      const { data: existing } = await supabase
+        .from('app_users')
+        .select('id')
+        .ilike('username', cleanUsername)
+        .maybeSingle();
 
-    // 1. Save in local cache
-    users.push(newUser);
-    await AsyncStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
-
-    // 2. Push to Supabase immediately so ANY other phone can login!
-    if (isSupabaseConfigured()) {
-      try {
-        const { error } = await supabase.from('app_users').upsert({
-          id: newUser.id,
-          username: newUser.username,
-          password: newUser.password,
-          name: newUser.name,
-          role: newUser.role,
-          email: newUser.email,
-          created_at: newUser.createdAt,
-        });
-
-        if (error) {
-          console.warn('Supabase createUser warning:', error.message);
-        }
-      } catch (err) {
-        console.warn('Cloud user sync deferred:', err);
+      if (existing) {
+        return { success: false, error: 'Username already exists.' };
       }
-    }
 
-    return { success: true, user: newUser };
+      const newUser: User = {
+        id: `user-${generateUUID()}`,
+        username: cleanUsername,
+        name: userData.name.trim() || cleanUsername,
+        role: userData.role,
+        email: userData.email || `${cleanUsername}@field.offdp.org`,
+        cachedOffline: false,
+        token: `jwt_${cleanUsername}_${Date.now()}`,
+        createdAt: new Date().toISOString(),
+      };
+
+      const { error } = await supabase.from('app_users').insert({
+        id: newUser.id,
+        username: newUser.username,
+        password: userData.password.trim(),
+        name: newUser.name,
+        role: newUser.role,
+        email: newUser.email,
+        created_at: newUser.createdAt,
+      });
+
+      if (error) {
+        return { success: false, error: error.message };
+      }
+
+      // Refresh local directory cache
+      await this.getUsers(true);
+      return { success: true, user: newUser };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Network error while creating user. Please try again when online.',
+      };
+    }
   }
 
-  // Edit existing user
+  // Edit existing user (REQUIRES INTERNET)
   static async updateUser(
     id: string,
-    updates: { name?: string; password?: string; role?: UserRole; email?: string }
-  ): Promise<{ success: boolean; user?: User; error?: string }> {
-    const users = await this.getUsers();
-    const index = users.findIndex((u) => u.id === id);
-    if (index === -1) {
-      return { success: false, error: 'User not found' };
+    updates: { name?: string; password?: string; role?: UserRole; email?: string },
+    isOnline: boolean
+  ): Promise<{ success: boolean; user?: User; error?: string; offlineBlocked?: boolean }> {
+    if (!isOnline) {
+      return {
+        success: false,
+        offlineBlocked: true,
+        error: 'Internet connection is required to update user accounts.',
+      };
     }
 
-    const current = users[index];
-    const updatedUser: User = {
-      ...current,
-      name: updates.name !== undefined ? updates.name.trim() : current.name,
-      password: updates.password !== undefined && updates.password.trim() ? updates.password : current.password,
-      role: updates.role !== undefined ? updates.role : current.role,
-      email: updates.email !== undefined ? updates.email : current.email,
-    };
+    if (!isSupabaseConfigured()) {
+      return { success: false, error: 'Cloud backend is not configured.' };
+    }
 
-    users[index] = updatedUser;
-    await AsyncStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(users));
-
-    // Sync update to Supabase
-    if (isSupabaseConfigured()) {
-      try {
-        await supabase.from('app_users').upsert({
-          id: updatedUser.id,
-          username: updatedUser.username,
-          password: updatedUser.password,
-          name: updatedUser.name,
-          role: updatedUser.role,
-          email: updatedUser.email,
-        });
-      } catch (err) {
-        console.warn('Cloud user update deferred:', err);
+    try {
+      const payload: Record<string, any> = {};
+      if (updates.name !== undefined) payload.name = updates.name.trim();
+      if (updates.password !== undefined && updates.password.trim()) {
+        payload.password = updates.password.trim();
       }
-    }
+      if (updates.role !== undefined) payload.role = updates.role;
+      if (updates.email !== undefined) payload.email = updates.email;
 
-    const currentSession = await this.getCurrentUser();
-    if (currentSession && currentSession.id === id) {
-      await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(updatedUser));
-    }
+      const { data, error } = await supabase
+        .from('app_users')
+        .update(payload)
+        .eq('id', id)
+        .select('id, username, name, role, email, created_at')
+        .single();
 
-    return { success: true, user: updatedUser };
+      if (error || !data) {
+        return { success: false, error: error?.message || 'User not found.' };
+      }
+
+      const updatedUser: User = {
+        id: data.id,
+        username: data.username,
+        name: data.name,
+        role: data.role as UserRole,
+        email: data.email,
+        cachedOffline: true,
+        token: `jwt_${data.username}`,
+        createdAt: data.created_at,
+      };
+
+      // Update cached credential if this user was cached on this device
+      if (updates.password && updates.password.trim()) {
+        const creds = await this.getCachedCredentialsMap();
+        if (creds[updatedUser.username.toLowerCase()]) {
+          await this.saveCachedCredential(updatedUser, updates.password.trim());
+        }
+      }
+
+      const currentSession = await this.getCurrentUser();
+      if (currentSession && currentSession.id === id) {
+        await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(updatedUser));
+      }
+
+      await this.getUsers(true);
+      return { success: true, user: updatedUser };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to update user.' };
+    }
   }
 
-  // Delete user
-  static async deleteUser(id: string): Promise<{ success: boolean; error?: string }> {
-    const users = await this.getUsers();
+  // Delete user (REQUIRES INTERNET)
+  static async deleteUser(
+    id: string,
+    isOnline: boolean
+  ): Promise<{ success: boolean; error?: string; offlineBlocked?: boolean }> {
+    if (!isOnline) {
+      return {
+        success: false,
+        offlineBlocked: true,
+        error: 'Internet connection is required to delete user accounts.',
+      };
+    }
+
+    const users = await this.getUsers(true);
     const userToDelete = users.find((u) => u.id === id);
     if (!userToDelete) {
-      return { success: false, error: 'User not found' };
+      return { success: false, error: 'User not found.' };
     }
 
-    if (userToDelete.username === 'narayan') {
-      return { success: false, error: 'The primary default supervisor "narayan" cannot be deleted' };
+    if (userToDelete.username.toLowerCase() === 'narayan') {
+      return { success: false, error: 'The primary default supervisor "narayan" cannot be deleted.' };
     }
 
-    const filtered = users.filter((u) => u.id !== id);
-    await AsyncStorage.setItem(USERS_STORAGE_KEY, JSON.stringify(filtered));
-
-    if (isSupabaseConfigured()) {
-      try {
-        await supabase.from('app_users').delete().eq('id', id);
-      } catch (err) {
-        console.warn('Cloud user delete deferred:', err);
+    try {
+      const { error } = await supabase.from('app_users').delete().eq('id', id);
+      if (error) {
+        return { success: false, error: error.message };
       }
-    }
 
-    return { success: true };
+      await this.removeCachedCredential(userToDelete.username);
+      await this.getUsers(true);
+      return { success: true };
+    } catch (err: any) {
+      return { success: false, error: err?.message || 'Failed to delete user.' };
+    }
   }
 
-  // Login with username and password
+  /**
+   * Login flow:
+   * - First sign-in on a device REQUIRES internet to authenticate against Supabase.
+   * - Upon successful online sign-in, caches hashed credentials locally for that user.
+   * - Subsequent logins work even offline using the locally cached credentials.
+   */
   static async login(
     usernameInput: string,
     passwordInput: string,
-    rememberMe: boolean = true
-  ): Promise<{ success: boolean; user?: User; error?: string }> {
-    // Refresh user list from Supabase first
-    const users = await this.getUsers();
+    rememberMe: boolean = true,
+    isOnline: boolean = true
+  ): Promise<{ success: boolean; user?: User; error?: string; requiresInternet?: boolean }> {
     const uClean = usernameInput.trim().toLowerCase();
     const pClean = passwordInput.trim();
 
-    const matched = users.find(
-      (u) => u.username.toLowerCase() === uClean && u.password === pClean
-    );
-
-    if (!matched) {
-      return { success: false, error: 'Invalid username or password' };
+    if (!uClean || !pClean) {
+      return { success: false, error: 'Username and password are required.' };
     }
 
-    await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(matched));
+    const cachedMap = await this.getCachedCredentialsMap();
+    const cachedEntry = cachedMap[uClean];
+
+    // 1. If online, verify against Supabase so role/password updates are always respected
+    if (isOnline && isSupabaseConfigured()) {
+      try {
+        const { data: cloudUser, error } = await supabase
+          .from('app_users')
+          .select('id, username, password, name, role, email, created_at')
+          .ilike('username', uClean)
+          .maybeSingle();
+
+        if (!error && cloudUser) {
+          if (cloudUser.password !== pClean) {
+            return { success: false, error: 'Invalid username or password.' };
+          }
+
+          const authenticatedUser: User = {
+            id: cloudUser.id,
+            username: cloudUser.username,
+            name: cloudUser.name,
+            role: cloudUser.role as UserRole,
+            email: cloudUser.email,
+            cachedOffline: true,
+            token: `jwt_${cloudUser.username}_${Date.now()}`,
+            createdAt: cloudUser.created_at,
+          };
+
+          // Cache credentials locally for future offline logins
+          await this.saveCachedCredential(authenticatedUser, pClean);
+          await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authenticatedUser));
+          await AsyncStorage.setItem(REMEMBER_ME_KEY, rememberMe ? 'true' : 'false');
+          return { success: true, user: authenticatedUser };
+        }
+
+        if (!error && !cloudUser) {
+          return { success: false, error: 'Invalid username or password.' };
+        }
+      } catch (err) {
+        console.warn('Online auth check failed, checking local cache:', err);
+      }
+    }
+
+    // 2. Offline (or cloud unreachable): only allow if user has already signed in online before
+    if (!cachedEntry) {
+      return {
+        success: false,
+        requiresInternet: true,
+        error:
+          'Internet connection is required for your first sign-in on this device. Connect to Wi-Fi or mobile data and sign in once to enable offline access.',
+      };
+    }
+
+    const inputHash = hashCredential(pClean, cachedEntry.user.id);
+    if (inputHash !== cachedEntry.passwordHash) {
+      return { success: false, error: 'Invalid username or password.' };
+    }
+
+    const offlineUser: User = {
+      ...cachedEntry.user,
+      cachedOffline: true,
+    };
+
+    await AsyncStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(offlineUser));
     await AsyncStorage.setItem(REMEMBER_ME_KEY, rememberMe ? 'true' : 'false');
-    return { success: true, user: matched };
+    return { success: true, user: offlineUser };
   }
 
   // Get current active session
@@ -269,8 +369,21 @@ export class AuthService {
     }
   }
 
-  // Logout
+  // Check whether Remember Me auto-login is enabled
+  static async shouldAutoLogin(): Promise<boolean> {
+    try {
+      const remember = await AsyncStorage.getItem(REMEMBER_ME_KEY);
+      if (remember !== 'true') return false;
+      const user = await this.getCurrentUser();
+      return Boolean(user);
+    } catch {
+      return false;
+    }
+  }
+
+  // Logout (clears active session, preserves offline login cache so user can sign back in offline)
   static async logout(): Promise<void> {
     await AsyncStorage.removeItem(AUTH_STORAGE_KEY);
+    await AsyncStorage.setItem(REMEMBER_ME_KEY, 'false');
   }
 }

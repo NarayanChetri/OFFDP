@@ -160,7 +160,7 @@ export const NavigationDrawer: React.FC<NavigationDrawerProps> = ({
                   ]}
                 />
                 <Text style={styles.statusText}>
-                  {isOnline ? 'Online • Supabase Cloud Active' : 'Offline • Local SQLite Active'}
+                  {isOnline ? 'Online • Supabase Cloud Active' : 'Offline • Local Storage Active'}
                 </Text>
               </View>
             </View>

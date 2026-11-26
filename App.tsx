@@ -4,8 +4,9 @@ import { StatusBar } from 'expo-status-bar';
 import NetInfo from '@react-native-community/netinfo';
 import { ScreenName, User, FieldRecord, SyncQueueItem, CensusData } from './src/types';
 import { StorageService } from './src/services/storageService';
-import { AuthService, DEFAULT_SUPERVISOR } from './src/services/authService';
+import { AuthService } from './src/services/authService';
 import { SyncService } from './src/services/syncService';
+import { generateUUID } from './src/utils/helpers';
 
 // Screens
 import { SplashScreen } from './src/screens/SplashScreen';
@@ -24,17 +25,18 @@ import { NavigationDrawer } from './src/components/NavigationDrawer';
 export default function App() {
   const [currentScreen, setCurrentScreen] = useState<ScreenName>('Splash');
   const [drawerVisible, setDrawerVisible] = useState(false);
-  const [currentUser, setCurrentUser] = useState<User | null>(DEFAULT_SUPERVISOR);
+  const [currentUser, setCurrentUser] = useState<User | null>(null);
   const [records, setRecords] = useState<FieldRecord[]>([]);
   const [syncQueue, setSyncQueue] = useState<SyncQueueItem[]>([]);
   const [lastSyncTime, setLastSyncTime] = useState('Never');
 
-  // Draft being resumed/edited
+  // Draft / rejected record being resumed/edited
   const [editingDraft, setEditingDraft] = useState<FieldRecord | null>(null);
 
   // Real-time network state
   const [isOnline, setIsOnline] = useState<boolean>(true);
   const isOnlineRef = useRef(true);
+  const isWifiRef = useRef(true);
 
   // Monitor network connectivity
   useEffect(() => {
@@ -42,6 +44,7 @@ export default function App() {
       const online = Boolean(state.isConnected && state.isInternetReachable !== false);
       setIsOnline(online);
       isOnlineRef.current = online;
+      isWifiRef.current = state.type === 'wifi';
       SyncService.setOnline(online);
     });
 
@@ -49,6 +52,7 @@ export default function App() {
       const online = Boolean(state.isConnected && state.isInternetReachable !== false);
       setIsOnline(online);
       isOnlineRef.current = online;
+      isWifiRef.current = state.type === 'wifi';
       SyncService.setOnline(online);
       if (online) {
         triggerAutoSync();
@@ -59,10 +63,11 @@ export default function App() {
   }, []);
 
   const loadData = async () => {
-    const loadedRecords = await StorageService.getRecords();
+    const loadedRecords = await StorageService.getRecords(isOnlineRef.current);
     const loadedQueue = await StorageService.getSyncQueue();
     const loadedTime = await StorageService.getLastSyncTime();
-    const activeUser = await AuthService.getCurrentUser();
+    const autoLogin = await AuthService.shouldAutoLogin();
+    const activeUser = autoLogin ? await AuthService.getCurrentUser() : null;
 
     setRecords(loadedRecords);
     setSyncQueue(loadedQueue);
@@ -76,10 +81,16 @@ export default function App() {
     loadData();
   }, []);
 
-  // Background auto sync
-  const triggerAutoSync = async () => {
+  // Background auto sync (respects Background Sync & Wi-Fi Only settings)
+  const triggerAutoSync = async (force: boolean = false) => {
     if (!isOnlineRef.current) return;
     try {
+      if (!force) {
+        const settings = await StorageService.getSyncSettings();
+        if (!settings.backgroundSync) return;
+        if (settings.wifiOnly && !isWifiRef.current) return;
+      }
+
       await SyncService.executeSync();
       const local = await StorageService.getLocalRecords();
       const loadedQueue = await StorageService.getSyncQueue();
@@ -101,35 +112,56 @@ export default function App() {
     return () => clearInterval(syncTimer);
   }, []);
 
+  const handleSplashContinue = async () => {
+    const autoLogin = await AuthService.shouldAutoLogin();
+    if (autoLogin) {
+      const activeUser = await AuthService.getCurrentUser();
+      if (activeUser) {
+        setCurrentUser(activeUser);
+        setCurrentScreen('Dashboard');
+        return;
+      }
+    }
+    setCurrentScreen('Login');
+  };
+
   // Save or update census record (Draft or Final)
   const handleSaveRecord = async (newRecordData: Partial<FieldRecord>, isDraft: boolean) => {
     const authorId = currentUser ? currentUser.id : 'worker-001';
     const authorName = currentUser ? currentUser.name : 'Field Worker';
     const now = new Date().toISOString();
 
-    const targetId = newRecordData.id || `rec-${Date.now().toString().slice(-6)}`;
+    const existingRecord = newRecordData.id
+      ? records.find((r) => r.id === newRecordData.id)
+      : undefined;
+    const targetId = existingRecord?.id || newRecordData.id || `rec-${generateUUID()}`;
+
+    const nextVersion = existingRecord ? (existingRecord.version || 1) + 1 : 1;
+    const nextVectorClock = {
+      ...(existingRecord?.vectorClock || {}),
+      [authorId]: ((existingRecord?.vectorClock || {})[authorId] || 0) + 1,
+    };
 
     const fullRecord: FieldRecord = {
       id: targetId,
       siteName: newRecordData.siteName || 'Survey Site',
-      coordinates: newRecordData.coordinates || { latitude: 26.634, longitude: 92.791 },
+      coordinates: newRecordData.coordinates || { latitude: 0, longitude: 0 },
       observationType: 'Digital Census 2026',
       data: (newRecordData.data as CensusData) || ({} as any),
       photoUri: newRecordData.photoUri,
       photoCompressedSize: newRecordData.photoCompressedSize,
       status: isDraft ? 'draft' : 'pending',
-      version: 1,
-      vectorClock: { [authorId]: 1 },
-      createdAt: newRecordData.createdAt || now,
+      version: nextVersion,
+      vectorClock: nextVectorClock,
+      createdAt: existingRecord?.createdAt || newRecordData.createdAt || now,
       updatedAt: now,
-      submittedBy: authorId,
-      submittedByName: authorName,
+      submittedBy: existingRecord?.submittedBy || authorId,
+      submittedByName: existingRecord?.submittedByName || authorName,
     };
 
     // Save locally (NEVER BLOCKS ON NETWORK - WORKS OFFLINE!)
     const saveResult = await StorageService.saveRecord(fullRecord, isDraft);
 
-    // If duplicate Aadhaar UID exists, alert and halt (Requirement 4)
     if (!saveResult.success && saveResult.isDuplicate) {
       Alert.alert(
         'Aadhaar Already Registered',
@@ -140,12 +172,13 @@ export default function App() {
     }
 
     if (!isDraft) {
+      const isResubmission = existingRecord && existingRecord.status !== 'draft';
       const queueItem: SyncQueueItem = {
-        id: `q-${Date.now().toString().slice(-6)}`,
+        id: `q-${generateUUID()}`,
         recordId: fullRecord.id,
         siteName: fullRecord.siteName,
         observationType: fullRecord.observationType,
-        operation: 'CREATE',
+        operation: isResubmission ? 'UPDATE' : 'CREATE',
         deltaPayload: {
           siteName: fullRecord.siteName,
           observationType: fullRecord.observationType,
@@ -156,7 +189,6 @@ export default function App() {
       };
       await StorageService.addToSyncQueue(queueItem);
 
-      // Trigger background sync if online
       if (isOnlineRef.current) {
         triggerAutoSync();
       }
@@ -189,33 +221,54 @@ export default function App() {
       updatedData,
       currentUser.id,
       currentUser.name,
-      supervisorNotes
+      supervisorNotes,
+      isOnlineRef.current
     );
     const local = await StorageService.getLocalRecords();
+    const loadedQueue = await StorageService.getSyncQueue();
     setRecords(local);
+    setSyncQueue(loadedQueue);
   };
 
   // Delete draft record
   const handleDeleteRecord = async (recordId: string) => {
-    await StorageService.deleteRecord(recordId);
+    await StorageService.deleteRecord(recordId, isOnlineRef.current);
     const local = await StorageService.getLocalRecords();
+    const loadedQueue = await StorageService.getSyncQueue();
     setRecords(local);
+    setSyncQueue(loadedQueue);
   };
 
   // Supervisor approves record
   const handleApproveRecord = async (recordId: string, notes?: string) => {
     if (!currentUser) return;
-    await StorageService.approveRecord(recordId, currentUser.id, currentUser.name, notes);
+    await StorageService.approveRecord(
+      recordId,
+      currentUser.id,
+      currentUser.name,
+      notes,
+      isOnlineRef.current
+    );
     const local = await StorageService.getLocalRecords();
+    const loadedQueue = await StorageService.getSyncQueue();
     setRecords(local);
+    setSyncQueue(loadedQueue);
   };
 
   // Supervisor rejects record
   const handleRejectRecord = async (recordId: string, reason: string) => {
     if (!currentUser) return;
-    await StorageService.rejectRecord(recordId, currentUser.id, currentUser.name, reason);
+    await StorageService.rejectRecord(
+      recordId,
+      currentUser.id,
+      currentUser.name,
+      reason,
+      isOnlineRef.current
+    );
     const local = await StorageService.getLocalRecords();
+    const loadedQueue = await StorageService.getSyncQueue();
     setRecords(local);
+    setSyncQueue(loadedQueue);
   };
 
   // Logout handler
@@ -225,32 +278,38 @@ export default function App() {
     setCurrentScreen('Login');
   };
 
+  // Worker-scoped records so field workers only see their own surveys
+  const workerRecords = currentUser
+    ? records.filter((r) => r.submittedBy === currentUser.id)
+    : [];
+
   // Render screens
   const renderCurrentScreen = () => {
+    if (currentScreen === 'Splash') {
+      return <SplashScreen onContinue={handleSplashContinue} />;
+    }
+
+    if (currentScreen === 'Login' || !currentUser) {
+      return (
+        <LoginScreen
+          onLoginSuccess={(user) => {
+            setCurrentUser(user);
+            setCurrentScreen('Dashboard');
+          }}
+          isOnline={isOnline}
+        />
+      );
+    }
+
+    const dashboardRecords =
+      currentUser.role === 'supervisor' ? records : workerRecords;
+
     switch (currentScreen) {
-      case 'Splash':
-        return (
-          <SplashScreen
-            onContinue={() => setCurrentScreen('Login')}
-          />
-        );
-
-      case 'Login':
-        return (
-          <LoginScreen
-            onLoginSuccess={(user) => {
-              setCurrentUser(user);
-              setCurrentScreen('Dashboard');
-            }}
-            isOnline={isOnline}
-          />
-        );
-
       case 'Dashboard':
         return (
           <DashboardScreen
-            user={currentUser || DEFAULT_SUPERVISOR}
-            records={records}
+            user={currentUser}
+            records={dashboardRecords}
             syncQueue={syncQueue}
             lastSyncTime={lastSyncTime}
             isOnline={isOnline}
@@ -285,7 +344,7 @@ export default function App() {
       case 'MyRecords':
         return (
           <MyRecordsScreen
-            records={records}
+            records={workerRecords}
             isOnline={isOnline}
             onBack={() => setCurrentScreen('Dashboard')}
             onOpenMenu={() => setDrawerVisible(true)}
@@ -328,7 +387,6 @@ export default function App() {
           />
         );
 
-      case 'SupervisorReviewScreen' as any:
       case 'SupervisorReview':
         return (
           <SupervisorReviewScreen
@@ -356,8 +414,8 @@ export default function App() {
       default:
         return (
           <DashboardScreen
-            user={currentUser || DEFAULT_SUPERVISOR}
-            records={records}
+            user={currentUser}
+            records={dashboardRecords}
             syncQueue={syncQueue}
             lastSyncTime={lastSyncTime}
             isOnline={isOnline}

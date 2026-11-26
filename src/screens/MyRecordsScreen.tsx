@@ -29,7 +29,7 @@ interface MyRecordsScreenProps {
   onRefresh?: () => Promise<void>;
 }
 
-type FilterTab = 'all' | 'draft' | 'pending' | 'synced';
+type FilterTab = 'all' | 'draft' | 'pending' | 'synced' | 'rejected';
 
 export const MyRecordsScreen: React.FC<MyRecordsScreenProps> = ({
   records,
@@ -58,11 +58,13 @@ export const MyRecordsScreen: React.FC<MyRecordsScreenProps> = ({
   const draftsCount = records.filter((r) => r.status === 'draft').length;
   const pendingCount = records.filter((r) => r.status === 'pending').length;
   const syncedCount = records.filter((r) => r.status === 'synced' || r.status === 'approved').length;
+  const rejectedCount = records.filter((r) => r.status === 'rejected').length;
 
   const filteredRecords = records.filter((r) => {
     if (activeTab === 'draft' && r.status !== 'draft') return false;
     if (activeTab === 'pending' && r.status !== 'pending') return false;
     if (activeTab === 'synced' && r.status !== 'synced' && r.status !== 'approved') return false;
+    if (activeTab === 'rejected' && r.status !== 'rejected') return false;
 
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
@@ -103,6 +105,7 @@ export const MyRecordsScreen: React.FC<MyRecordsScreenProps> = ({
     const isApproved = item.status === 'approved';
     const isDraft = item.status === 'draft';
     const isPending = item.status === 'pending';
+    const isRejected = item.status === 'rejected';
 
     return (
       <TouchableOpacity
@@ -116,12 +119,29 @@ export const MyRecordsScreen: React.FC<MyRecordsScreenProps> = ({
               styles.avatarBox,
               isApproved && { backgroundColor: '#dcfce7' },
               isDraft && { backgroundColor: '#f1f5f9' },
+              isRejected && { backgroundColor: '#fee2e2' },
             ]}
           >
             <Ionicons
-              name={isApproved ? 'shield-checkmark' : isDraft ? 'create-outline' : 'person'}
+              name={
+                isApproved
+                  ? 'shield-checkmark'
+                  : isDraft
+                  ? 'create-outline'
+                  : isRejected
+                  ? 'alert-circle'
+                  : 'person'
+              }
               size={20}
-              color={isApproved ? '#16a34a' : isDraft ? '#4b5563' : '#7c3aed'}
+              color={
+                isApproved
+                  ? '#16a34a'
+                  : isDraft
+                  ? '#4b5563'
+                  : isRejected
+                  ? '#dc2626'
+                  : '#7c3aed'
+              }
             />
           </View>
 
@@ -138,6 +158,7 @@ export const MyRecordsScreen: React.FC<MyRecordsScreenProps> = ({
               isApproved && styles.badgeApproved,
               isDraft && styles.badgeDraft,
               isPending && styles.badgePending,
+              isRejected && { backgroundColor: '#fee2e2' },
             ]}
           >
             <Text
@@ -146,6 +167,7 @@ export const MyRecordsScreen: React.FC<MyRecordsScreenProps> = ({
                 isApproved && { color: '#16a34a' },
                 isDraft && { color: '#6b7280' },
                 isPending && { color: '#d97706' },
+                isRejected && { color: '#dc2626' },
               ]}
             >
               {item.status.toUpperCase()}
@@ -153,15 +175,19 @@ export const MyRecordsScreen: React.FC<MyRecordsScreenProps> = ({
           </View>
         </View>
 
-        {isDraft && (
+        {(isDraft || isRejected) && (
           <TouchableOpacity
-            style={styles.resumeDraftBar}
+            style={[styles.resumeDraftBar, isRejected && { backgroundColor: '#fef2f2' }]}
             onPress={() => handleResumeDraft(item)}
             activeOpacity={0.8}
           >
-            <Ionicons name="create" size={14} color="#7c3aed" />
-            <Text style={styles.resumeDraftBarText}>Tap to resume & complete this draft</Text>
-            <Ionicons name="arrow-forward" size={14} color="#7c3aed" />
+            <Ionicons name="create" size={14} color={isRejected ? '#dc2626' : '#7c3aed'} />
+            <Text style={[styles.resumeDraftBarText, isRejected && { color: '#dc2626' }]}>
+              {isRejected
+                ? 'Returned by supervisor — tap to edit & resubmit'
+                : 'Tap to resume & complete this draft'}
+            </Text>
+            <Ionicons name="arrow-forward" size={14} color={isRejected ? '#dc2626' : '#7c3aed'} />
           </TouchableOpacity>
         )}
 
@@ -245,6 +271,15 @@ export const MyRecordsScreen: React.FC<MyRecordsScreenProps> = ({
         >
           <Text style={[styles.filterChipText, activeTab === 'draft' && styles.filterChipTextActive]}>
             Drafts ({draftsCount})
+          </Text>
+        </TouchableOpacity>
+
+        <TouchableOpacity
+          style={[styles.filterChip, activeTab === 'rejected' && styles.filterChipActive]}
+          onPress={() => setActiveTab('rejected')}
+        >
+          <Text style={[styles.filterChipText, activeTab === 'rejected' && styles.filterChipTextActive]}>
+            Rejected ({rejectedCount})
           </Text>
         </TouchableOpacity>
       </View>
@@ -348,15 +383,19 @@ export const MyRecordsScreen: React.FC<MyRecordsScreenProps> = ({
                   </View>
                 )}
 
-                {/* If it's a draft, allow editing */}
-                {selectedRecord.status === 'draft' && (
+                {/* If it's a draft or rejected, allow editing/resubmitting */}
+                {(selectedRecord.status === 'draft' || selectedRecord.status === 'rejected') && (
                   <TouchableOpacity
                     style={styles.editDraftBtn}
                     onPress={() => handleResumeDraft(selectedRecord)}
                     activeOpacity={0.85}
                   >
                     <Ionicons name="create" size={18} color="#ffffff" />
-                    <Text style={styles.editDraftBtnText}>Edit & Complete Draft</Text>
+                    <Text style={styles.editDraftBtnText}>
+                      {selectedRecord.status === 'rejected'
+                        ? 'Edit & Resubmit Survey'
+                        : 'Edit & Complete Draft'}
+                    </Text>
                   </TouchableOpacity>
                 )}
 
@@ -413,6 +452,7 @@ const styles = StyleSheet.create({
   },
   filterRow: {
     flexDirection: 'row',
+    flexWrap: 'wrap',
     paddingHorizontal: 16,
     paddingVertical: 10,
     gap: 8,

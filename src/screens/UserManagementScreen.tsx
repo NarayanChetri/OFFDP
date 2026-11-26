@@ -40,15 +40,26 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
   const [showPassword, setShowPassword] = useState(false);
 
   const loadUsers = async () => {
-    const list = await AuthService.getUsers();
+    const list = await AuthService.getUsers(isOnline);
     setUsers(list);
   };
 
   useEffect(() => {
     loadUsers();
-  }, []);
+  }, [isOnline]);
+
+  const showOfflineAlert = (action: string) => {
+    Alert.alert(
+      'Internet Connection Required',
+      `You are currently offline. An active internet connection is required to ${action} user accounts.`
+    );
+  };
 
   const openCreateModal = () => {
+    if (!isOnline) {
+      showOfflineAlert('create new');
+      return;
+    }
     setEditingUser(null);
     setName('');
     setUsername('');
@@ -59,57 +70,80 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
   };
 
   const openEditModal = (u: User) => {
+    if (!isOnline) {
+      showOfflineAlert('edit');
+      return;
+    }
     setEditingUser(u);
     setName(u.name);
     setUsername(u.username);
-    setPassword(u.password || '');
+    setPassword('');
     setRole(u.role);
     setShowPassword(false);
     setModalVisible(true);
   };
 
   const handleSave = async () => {
-    if (!name.trim() || !username.trim() || !password.trim()) {
-      Alert.alert('Validation Error', 'Full Name, Username, and Password are all required.');
+    if (!isOnline) {
+      showOfflineAlert(editingUser ? 'update' : 'create');
       return;
     }
 
     if (editingUser) {
-      // Update existing user
-      const result = await AuthService.updateUser(editingUser.id, {
-        name,
-        password,
-        role,
-      });
+      if (!name.trim()) {
+        Alert.alert('Validation Error', 'Full Name is required.');
+        return;
+      }
+      // Update existing user (password optional when editing)
+      const result = await AuthService.updateUser(
+        editingUser.id,
+        {
+          name,
+          ...(password.trim() ? { password } : {}),
+          role,
+        },
+        isOnline
+      );
 
       if (result.success) {
         Alert.alert('User Updated', `User @${username} was updated successfully.`);
         setModalVisible(false);
         await loadUsers();
       } else {
-        Alert.alert('Error', result.error || 'Failed to update user.');
+        Alert.alert(result.offlineBlocked ? 'Internet Required' : 'Error', result.error || 'Failed to update user.');
       }
     } else {
+      if (!name.trim() || !username.trim() || !password.trim()) {
+        Alert.alert('Validation Error', 'Full Name, Username, and Password are all required.');
+        return;
+      }
       // Create new user
-      const result = await AuthService.createUser({
-        name,
-        username,
-        password,
-        role,
-      });
+      const result = await AuthService.createUser(
+        {
+          name,
+          username,
+          password,
+          role,
+        },
+        isOnline
+      );
 
       if (result.success) {
         Alert.alert('User Created', `User @${username} registered successfully as ${role === 'supervisor' ? 'Supervisor' : 'Field Worker'}.`);
         setModalVisible(false);
         await loadUsers();
       } else {
-        Alert.alert('Error', result.error || 'Failed to create user.');
+        Alert.alert(result.offlineBlocked ? 'Internet Required' : 'Error', result.error || 'Failed to create user.');
       }
     }
   };
 
   const handleDelete = (u: User) => {
-    if (u.username === 'narayan') {
+    if (!isOnline) {
+      showOfflineAlert('delete');
+      return;
+    }
+    if (u.username.toLowerCase() === 'narayan') {
       Alert.alert('Action Forbidden', 'The default supervisor "narayan" cannot be deleted.');
       return;
     }
@@ -123,12 +157,12 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
           text: 'Delete',
           style: 'destructive',
           onPress: async () => {
-            const res = await AuthService.deleteUser(u.id);
+            const res = await AuthService.deleteUser(u.id, isOnline);
             if (res.success) {
               await loadUsers();
               Alert.alert('Deleted', `User @${u.username} was removed.`);
             } else {
-              Alert.alert('Error', res.error || 'Failed to delete user.');
+              Alert.alert(res.offlineBlocked ? 'Internet Required' : 'Error', res.error || 'Failed to delete user.');
             }
           },
         },
@@ -258,11 +292,13 @@ export const UserManagementScreen: React.FC<UserManagementScreenProps> = ({
             />
 
             {/* Password */}
-            <Text style={styles.inputLabel}>Password</Text>
+            <Text style={styles.inputLabel}>
+              {editingUser ? 'New Password (optional)' : 'Password'}
+            </Text>
             <View style={styles.passwordWrapper}>
               <TextInput
                 style={styles.passwordInput}
-                placeholder="Password"
+                placeholder={editingUser ? 'Leave blank to keep current password' : 'Password'}
                 value={password}
                 onChangeText={setPassword}
                 secureTextEntry={!showPassword}

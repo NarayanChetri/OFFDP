@@ -48,7 +48,9 @@ export const DashboardScreen: React.FC<DashboardScreenProps> = ({
 }) => {
   const [isRefreshing, setIsRefreshing] = useState(false);
   const isSupervisor = user.role === 'supervisor';
-  const pendingSyncCount = syncQueue.filter((q) => q.status === 'pending').length;
+  const pendingSyncCount = syncQueue.filter(
+    (q) => q.status === 'pending' || q.status === 'failed'
+  ).length;
 
   // Supervisor metrics
   const pendingReviewCount = records.filter(

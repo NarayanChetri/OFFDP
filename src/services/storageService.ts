@@ -1,11 +1,23 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { FieldRecord, SyncQueueItem, CensusData } from '../types';
 import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { generateUUID } from '../utils/helpers';
 
 const STORAGE_KEYS = {
   RECORDS: '@offdp_records_v6_clean',
   QUEUE: '@offdp_sync_queue_v6_clean',
   LAST_SYNC: '@offdp_last_sync_v6_clean',
+  SYNC_SETTINGS: '@offdp_sync_settings_v1',
+};
+
+export interface SyncSettings {
+  backgroundSync: boolean;
+  wifiOnly: boolean;
+}
+
+const DEFAULT_SYNC_SETTINGS: SyncSettings = {
+  backgroundSync: true,
+  wifiOnly: false,
 };
 
 // Normalize Aadhaar UID for strict de-duplication (12 digits, no spaces/dashes)
@@ -25,19 +37,46 @@ export class StorageService {
     }
   }
 
-  // Gets records: loads local storage first, then syncs with Supabase if online
-  static async getRecords(): Promise<FieldRecord[]> {
-    let local = await this.getLocalRecords();
+  static async getSyncSettings(): Promise<SyncSettings> {
+    try {
+      const raw = await AsyncStorage.getItem(STORAGE_KEYS.SYNC_SETTINGS);
+      return raw ? { ...DEFAULT_SYNC_SETTINGS, ...JSON.parse(raw) } : DEFAULT_SYNC_SETTINGS;
+    } catch {
+      return DEFAULT_SYNC_SETTINGS;
+    }
+  }
 
-    // Pull from cloud if online
-    if (isSupabaseConfigured()) {
+  static async saveSyncSettings(settings: SyncSettings): Promise<void> {
+    await AsyncStorage.setItem(STORAGE_KEYS.SYNC_SETTINGS, JSON.stringify(settings));
+  }
+
+  // Gets records: loads local storage first, then pulls from Supabase if online
+  static async getRecords(isOnline: boolean = true): Promise<FieldRecord[]> {
+    const local = await this.getLocalRecords();
+
+    if (isOnline && isSupabaseConfigured()) {
       try {
         const { data: cloudRecords, error } = await supabase
           .from('field_records')
           .select('*')
           .order('updated_at', { ascending: false });
 
-        if (!error && cloudRecords && cloudRecords.length >= 0) {
+        if (!error && cloudRecords) {
+          const queue = await this.getSyncQueue();
+          const unsyncedQueueItems = queue.filter(
+            (q) => q.status === 'pending' || q.status === 'failed'
+          );
+          const pendingDeleteIds = new Set(
+            unsyncedQueueItems
+              .filter((q) => q.operation === 'DELETE')
+              .map((q) => q.recordId)
+          );
+          const pendingModifyIds = new Set(
+            unsyncedQueueItems
+              .filter((q) => q.operation !== 'DELETE')
+              .map((q) => q.recordId)
+          );
+
           const mappedCloud: FieldRecord[] = cloudRecords.map((cr: any) => ({
             id: cr.id,
             siteName: cr.site_name,
@@ -61,16 +100,23 @@ export class StorageService {
             supervisorNotes: cr.supervisor_notes,
           }));
 
-          // Preserve local drafts and pending queue items
-          const localDraftsAndPending = local.filter(
-            (l) => l.status === 'draft' || l.status === 'pending'
+          // Preserve local drafts, pending items, and any record with unsynced local edits
+          const preservedLocal = local.filter(
+            (l) =>
+              !pendingDeleteIds.has(l.id) &&
+              (l.status === 'draft' || l.status === 'pending' || pendingModifyIds.has(l.id))
           );
-          const combined = [...localDraftsAndPending];
+          const combined = [...preservedLocal];
 
           mappedCloud.forEach((mc) => {
+            if (pendingDeleteIds.has(mc.id)) return;
             const existingIdx = combined.findIndex((c) => c.id === mc.id);
             if (existingIdx >= 0) {
-              if (combined[existingIdx].status !== 'draft') {
+              // Keep local version if it's a draft or has unsynced local mutations
+              if (
+                combined[existingIdx].status !== 'draft' &&
+                !pendingModifyIds.has(mc.id)
+              ) {
                 combined[existingIdx] = mc;
               }
             } else {
@@ -81,7 +127,7 @@ export class StorageService {
           await AsyncStorage.setItem(STORAGE_KEYS.RECORDS, JSON.stringify(combined));
           return combined;
         }
-      } catch (err) {
+      } catch {
         // Offline fallback
       }
     }
@@ -111,12 +157,12 @@ export class StorageService {
         return {
           success: false,
           isDuplicate: true,
-          duplicateOwner: duplicate.data?.headName || duplicate.submittedByName || 'Another Household',
+          duplicateOwner:
+            duplicate.data?.headName || duplicate.submittedByName || 'Another Household',
         };
       }
     }
 
-    // Save or update in local storage
     const index = records.findIndex((r) => r.id === record.id);
     if (index >= 0) {
       records[index] = record;
@@ -128,13 +174,39 @@ export class StorageService {
     return { success: true, isDuplicate: false };
   }
 
+  private static async queueRecordMutation(
+    record: FieldRecord,
+    operation: 'CREATE' | 'UPDATE' | 'DELETE'
+  ): Promise<void> {
+    const queueItem: SyncQueueItem = {
+      id: `q-${generateUUID()}`,
+      recordId: record.id,
+      siteName: record.siteName,
+      observationType: record.observationType || 'Digital Census 2026',
+      operation,
+      deltaPayload:
+        operation === 'DELETE'
+          ? { id: record.id }
+          : {
+              siteName: record.siteName,
+              observationType: record.observationType,
+              data: record.data,
+              status: record.status,
+            },
+      retryCount: 0,
+      status: 'pending',
+    };
+    await this.addToSyncQueue(queueItem);
+  }
+
   // Supervisor edits census record details directly
   static async updateRecordDetails(
     recordId: string,
     updatedData: Partial<CensusData>,
     supervisorId: string,
     supervisorName: string,
-    supervisorNotes?: string
+    supervisorNotes?: string,
+    isOnline: boolean = true
   ): Promise<boolean> {
     const records = await this.getLocalRecords();
     const index = records.findIndex((r) => r.id === recordId);
@@ -146,34 +218,44 @@ export class StorageService {
       ...updatedData,
     };
     records[index].version = (records[index].version || 1) + 1;
+    records[index].vectorClock = {
+      ...(records[index].vectorClock || {}),
+      [supervisorId]: ((records[index].vectorClock || {})[supervisorId] || 0) + 1,
+    };
     records[index].updatedAt = now;
     records[index].reviewedBy = supervisorId;
     records[index].reviewedByName = supervisorName;
     records[index].reviewedAt = now;
-    if (supervisorNotes) {
+    if (supervisorNotes !== undefined) {
       records[index].supervisorNotes = supervisorNotes;
     }
 
     await this.saveRecords(records);
 
-    // Upload change to Supabase cloud if online
-    if (isSupabaseConfigured()) {
+    let syncedToCloud = false;
+    if (isOnline && isSupabaseConfigured()) {
       try {
-        await supabase
+        const { error } = await supabase
           .from('field_records')
           .update({
             data: records[index].data,
             version: records[index].version,
+            vector_clock: records[index].vectorClock,
             reviewed_by: supervisorId,
             reviewed_by_name: supervisorName,
             reviewed_at: now,
-            supervisor_notes: records[index].supervisorNotes,
+            supervisor_notes: records[index].supervisorNotes || null,
             updated_at: now,
           })
           .eq('id', recordId);
+        if (!error) syncedToCloud = true;
       } catch (err) {
-        console.warn('Cloud update failed:', err);
+        console.warn('Cloud update deferred to sync queue:', err);
       }
+    }
+
+    if (!syncedToCloud) {
+      await this.queueRecordMutation(records[index], 'UPDATE');
     }
 
     return true;
@@ -184,7 +266,8 @@ export class StorageService {
     recordId: string,
     supervisorId: string,
     supervisorName: string,
-    notes?: string
+    notes?: string,
+    isOnline: boolean = true
   ): Promise<boolean> {
     const records = await this.getLocalRecords();
     const index = records.findIndex((r) => r.id === recordId);
@@ -192,19 +275,23 @@ export class StorageService {
 
     const now = new Date().toISOString();
     records[index].status = 'approved';
+    records[index].version = (records[index].version || 1) + 1;
+    records[index].updatedAt = now;
     records[index].reviewedBy = supervisorId;
     records[index].reviewedByName = supervisorName;
     records[index].reviewedAt = now;
-    if (notes) records[index].supervisorNotes = notes;
+    if (notes !== undefined) records[index].supervisorNotes = notes;
 
     await this.saveRecords(records);
 
-    if (isSupabaseConfigured()) {
+    let syncedToCloud = false;
+    if (isOnline && isSupabaseConfigured()) {
       try {
-        await supabase
+        const { error } = await supabase
           .from('field_records')
           .update({
             status: 'approved',
+            version: records[index].version,
             reviewed_by: supervisorId,
             reviewed_by_name: supervisorName,
             reviewed_at: now,
@@ -212,7 +299,12 @@ export class StorageService {
             updated_at: now,
           })
           .eq('id', recordId);
-      } catch (err) {}
+        if (!error) syncedToCloud = true;
+      } catch {}
+    }
+
+    if (!syncedToCloud) {
+      await this.queueRecordMutation(records[index], 'UPDATE');
     }
 
     return true;
@@ -223,7 +315,8 @@ export class StorageService {
     recordId: string,
     supervisorId: string,
     supervisorName: string,
-    reason: string
+    reason: string,
+    isOnline: boolean = true
   ): Promise<boolean> {
     const records = await this.getLocalRecords();
     const index = records.findIndex((r) => r.id === recordId);
@@ -231,6 +324,8 @@ export class StorageService {
 
     const now = new Date().toISOString();
     records[index].status = 'rejected';
+    records[index].version = (records[index].version || 1) + 1;
+    records[index].updatedAt = now;
     records[index].reviewedBy = supervisorId;
     records[index].reviewedByName = supervisorName;
     records[index].reviewedAt = now;
@@ -238,12 +333,14 @@ export class StorageService {
 
     await this.saveRecords(records);
 
-    if (isSupabaseConfigured()) {
+    let syncedToCloud = false;
+    if (isOnline && isSupabaseConfigured()) {
       try {
-        await supabase
+        const { error } = await supabase
           .from('field_records')
           .update({
             status: 'rejected',
+            version: records[index].version,
             reviewed_by: supervisorId,
             reviewed_by_name: supervisorName,
             reviewed_at: now,
@@ -251,14 +348,22 @@ export class StorageService {
             updated_at: now,
           })
           .eq('id', recordId);
-      } catch (err) {}
+        if (!error) syncedToCloud = true;
+      } catch {}
+    }
+
+    if (!syncedToCloud) {
+      await this.queueRecordMutation(records[index], 'UPDATE');
     }
 
     return true;
   }
 
-  static async deleteRecord(recordId: string): Promise<void> {
+  static async deleteRecord(recordId: string, isOnline: boolean = true): Promise<void> {
     const records = await this.getLocalRecords();
+    const target = records.find((r) => r.id === recordId);
+    const wasOnlyLocalDraft = target?.status === 'draft';
+
     const filtered = records.filter((r) => r.id !== recordId);
     await this.saveRecords(filtered);
 
@@ -266,10 +371,20 @@ export class StorageService {
     const filteredQueue = queue.filter((q) => q.recordId !== recordId);
     await this.saveSyncQueue(filteredQueue);
 
-    if (isSupabaseConfigured()) {
+    if (wasOnlyLocalDraft) {
+      return;
+    }
+
+    let deletedInCloud = false;
+    if (isOnline && isSupabaseConfigured()) {
       try {
-        await supabase.from('field_records').delete().eq('id', recordId);
+        const { error } = await supabase.from('field_records').delete().eq('id', recordId);
+        if (!error) deletedInCloud = true;
       } catch {}
+    }
+
+    if (!deletedInCloud && target) {
+      await this.queueRecordMutation(target, 'DELETE');
     }
   }
 
